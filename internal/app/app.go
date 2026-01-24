@@ -19,6 +19,7 @@ import (
 	"github.com/abelbrown/observer/internal/store"
 	"github.com/abelbrown/observer/internal/ui/configview"
 	"github.com/abelbrown/observer/internal/ui/filters"
+	"github.com/abelbrown/observer/internal/ui/sources"
 	"github.com/abelbrown/observer/internal/ui/stream"
 	"github.com/abelbrown/observer/internal/ui/styles"
 	tea "github.com/charmbracelet/bubbletea"
@@ -33,6 +34,7 @@ const (
 	modeFilters
 	modeFilterWorkshop
 	modeConfig
+	modeSources
 )
 
 // Model is the root Bubble Tea model
@@ -41,7 +43,9 @@ type Model struct {
 	filterView     filters.Model
 	filterWorkshop filters.WorkshopModel
 	configView     configview.Model
+	sourcesView    sources.Model
 	filterEngine   *curation.FilterEngine
+	sourceManager  *curation.SourceManager
 	aggregator     *feeds.Aggregator
 	store          *store.Store
 	config         *config.Config
@@ -126,15 +130,21 @@ func New() Model {
 	// Initialize filter engine (no AI evaluator yet - can add later)
 	filterEngine := curation.NewFilterEngine(nil)
 
+	// Initialize source manager
+	configDir := filepath.Join(homeDir, ".observer")
+	sourceManager := curation.NewSourceManager(configDir)
+
 	return Model{
-		stream:       stream.New(),
-		filterView:   filters.New(filterEngine),
-		configView:   configview.New(cfg),
-		filterEngine: filterEngine,
-		aggregator:   agg,
-		store:        st,
-		config:       cfg,
-		mode:         modeStream,
+		stream:        stream.New(),
+		filterView:    filters.New(filterEngine),
+		configView:    configview.New(cfg),
+		sourcesView:   sources.New(sourceManager, feeds.DefaultRSSFeeds),
+		filterEngine:  filterEngine,
+		sourceManager: sourceManager,
+		aggregator:    agg,
+		store:         st,
+		config:        cfg,
+		mode:          modeStream,
 	}
 }
 
@@ -154,6 +164,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.updateFilterView(msg)
 	case modeConfig:
 		return m.updateConfigView(msg)
+	case modeSources:
+		return m.updateSourcesView(msg)
 	}
 
 	switch msg := msg.(type) {
@@ -259,6 +271,11 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.mode = modeConfig
 		m.configView.SetSize(m.width, m.height)
 
+	case "S":
+		// Open sources view (capital S to avoid conflict with shuffle)
+		m.mode = modeSources
+		m.sourcesView.SetSize(m.width, m.height)
+
 	case "/":
 		// Enter command mode
 		m.commandMode = true
@@ -303,6 +320,11 @@ func (m *Model) executeCommand(cmd string) tea.Cmd {
 	case "refresh":
 		return m.refreshAllSources()
 	case "sources":
+		// /sources opens the source manager (not just toggle panel)
+		m.mode = modeSources
+		m.sourcesView.SetSize(m.width, m.height)
+	case "panel":
+		// /panel toggles the source panel in stream view
 		m.showSources = !m.showSources
 	case "filter", "filters":
 		m.mode = modeFilters
@@ -340,6 +362,21 @@ func (m Model) updateConfigView(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
+func (m Model) updateSourcesView(msg tea.Msg) (tea.Model, tea.Cmd) {
+	var cmd tea.Cmd
+	m.sourcesView, cmd = m.sourcesView.Update(msg)
+
+	// Check if user closed the sources view
+	if m.sourcesView.IsQuitting() {
+		m.mode = modeStream
+		m.sourcesView.ResetQuitting()
+		// Refresh stream with new source settings
+		m.updateStreamItems()
+	}
+
+	return m, cmd
+}
+
 func (m *Model) shuffleItems() {
 	items := m.aggregator.GetItems()
 	rand.Shuffle(len(items), func(i, j int) {
@@ -367,6 +404,8 @@ func (m Model) View() string {
 		return m.filterView.View()
 	case modeConfig:
 		return m.configView.View()
+	case modeSources:
+		return m.sourcesView.View()
 	}
 
 	var sections []string
@@ -438,7 +477,7 @@ func (m Model) renderStatusBar() string {
 	if m.err != nil {
 		return "  Error: " + m.err.Error()
 	}
-	return "  [↑↓] navigate  [s] shuffle  [f] filters  [c] config  [r] refresh  [q] quit"
+	return "  [↑↓] navigate  [s] shuffle  [f] filters  [S] sources  [c] config  [r] refresh  [q] quit"
 }
 
 // Commands

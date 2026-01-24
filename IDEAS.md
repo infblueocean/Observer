@@ -370,6 +370,42 @@ See how different regions frame the same story.
 
 ---
 
+## Source Modes (Design Decision)
+
+**Problem:** With 120+ sources, users need control without complexity. Also, some sources are too noisy for daily reading but valuable for AI personas (e.g., arXiv papers, SEC filings).
+
+**Solution: Four modes with probabilistic exposure**
+
+| Mode | Fetched | Shown | AI Access | Use Case |
+|------|---------|-------|-----------|----------|
+| **Live** | Always | Always | Yes | Core news you want to see |
+| **Sample** | Always | Probabilistically | Yes | "Sometimes" sources |
+| **Auto** | On-demand | Never | Yes | Reference material for AI |
+| **Off** | Never | Never | No | Disabled entirely |
+
+**Key Insight: Auto Mode**
+The Auto mode is the clever bit. ArXiv cs.AI papers are too noisy for your daily stream, but when The Historian persona analyzes a news item about AI, it should be able to pull from academic sources. Auto mode = "in the library, not on my desk."
+
+**Exposure for Sample Mode**
+Instead of binary on/off, Sample mode uses a 0.0-1.0 probability:
+- 1.0 = always show (same as Live)
+- 0.5 = show ~half the time
+- 0.1 = show occasionally ("I don't want to miss this but don't flood me")
+
+**80/20 Decision:** Kept the UI minimal - just mode toggles and exposure slider. Skipped: category filtering, batch operations. Can add later if needed.
+
+**Retention Semantics (Design Decision):**
+- **Feed items** → Always persist. Your feed history is yours forever. Source mode affects *visibility*, not *storage*.
+- **Persona analysis** → Ephemeral by default. AI responses are regenerable on-demand. Don't bloat the DB with cached analysis.
+- **User annotations** → Persist. Your highlights, notes, bookmarks are permanent.
+- **Correlations** → Persist. The connection graph is valuable and hard to recreate.
+
+This means Off mode doesn't delete old items - it just stops fetching new ones and hides existing ones from stream.
+
+**Collaboration Value:** Source configs persist to `~/.observer/sources.json`. Future: shared sessions can merge configs (your local settings take precedence).
+
+---
+
 ## Anonymous Feed Principle
 
 **Core Design Decision:** Observer should only use anonymous, public feeds that require no login or tracking.
