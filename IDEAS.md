@@ -125,6 +125,55 @@ type UserPrediction struct {
 
 ---
 
+## Role-Based Personas (Curation Lens)
+
+Different from Brain Trust (which analyzes selected items). This is about **who you are** shaping what you see.
+
+**Concept:**
+```
+"I'm a project manager. Show me what matters to ME."
+"I'm a security researcher. Flag vulnerabilities."
+"I'm a startup founder. Boost funding/VC news."
+```
+
+**Implementation Approaches:**
+
+1. **Pre-built Role Personas**
+   - Project Manager: deadlines, team dynamics, productivity tools
+   - Security Researcher: CVEs, breaches, vulnerabilities, threat intel
+   - Startup Founder: funding rounds, VC moves, market trends
+   - Data Scientist: ML papers, tools, datasets, benchmarks
+   - Policy Wonk: legislation, regulations, political analysis
+
+2. **Custom Role Definition**
+   ```
+   /persona create "Hardware Engineer"
+   > "I design embedded systems. Highlight news about:
+      semiconductors, chip manufacturing, RISC-V, embedded
+      Linux, IoT security, supply chain issues."
+   ```
+
+3. **Role as Semantic Filter**
+   - Each role is essentially a boost/dim filter
+   - "Relevant to my role" → boost
+   - "Irrelevant" → dim (not hide - you still see everything)
+
+4. **Multi-Role Support**
+   - People wear many hats
+   - "Project Manager" during work hours
+   - "Space Enthusiast" evenings/weekends
+   - Time-based persona switching?
+
+**Tie-in with everything-claude-code:**
+- Could import persona definitions from that repo
+- Battle-tested prompts for different roles
+- Community-contributed personas
+
+**Key Insight:**
+This is curation by consent - you explicitly say "I am X, show me X-relevant things" rather than an algorithm inferring it from your behavior.
+
+---
+
 ## Wild Ideas
 
 ### Serendipity Engine
