@@ -257,6 +257,119 @@ Social accountability for healthier consumption.
 
 ---
 
+## Correlation Engine (First-Class Citizen)
+
+**Core Insight:** The persistence layer isn't just storage - it's **memory**. Connect the now to the past.
+
+### Entity Extraction
+Pull entities from every item:
+- People (Elon Musk, Biden)
+- Organizations (OpenAI, Fed)
+- Locations (Ukraine, Silicon Valley)
+- Topics (AI regulation, climate)
+- Tickers ($TSLA, $BTC)
+- Events (2024 Election, COP28)
+
+### Correlation Types
+| Type | Description |
+|------|-------------|
+| **Entity** | Same person/company appearing over time |
+| **Topic** | Same theme evolving |
+| **Prediction** | Market predicted → outcome happened |
+| **Coverage** | Multiple sources on same story |
+| **Causal** | Cause → effect relationships |
+| **Historical** | "This is like what happened in 2008" |
+
+### Threads
+Ongoing stories that span multiple items:
+```
+Thread: "OpenAI Leadership Drama"
+├── Nov 17: "Board fires Sam Altman"
+├── Nov 18: "Employees threaten to quit"
+├── Nov 19: "Microsoft offers jobs"
+├── Nov 21: "Altman returns as CEO"
+└── Ongoing: Related coverage
+```
+
+### UI Concept
+When viewing an item:
+```
+┌─────────────────────────────────────────────────┐
+│ Fed announces rate hold                         │
+├─────────────────────────────────────────────────┤
+│ 🔗 Related (from your history):                 │
+│   • 3 weeks ago: "Fed hints at cuts"            │
+│   • 2 months ago: "Inflation drops to 3%"       │
+│   • 6 months ago: "Markets bet on rate pause"   │
+│                                                 │
+│ 📊 Prediction Markets:                          │
+│   • "Rate cut by March" jumped 67% → 45%        │
+│                                                 │
+│ 📈 Entity Timeline: [Federal Reserve]           │
+│   47 mentions over 3 months                     │
+└─────────────────────────────────────────────────┘
+```
+
+### The Historian Persona
+Brain Trust's Historian is powered by correlation engine:
+- "This is similar to the 2008 financial crisis because..."
+- "The last time this company had leadership issues was..."
+- "This topic has been building for 3 months..."
+
+---
+
+## Translation & Normalization
+
+**Goal:** Digest sources from around the world, normalize to user's language.
+
+### Why This Matters
+- Most news happens outside English-speaking world
+- Direct sources > translated summaries
+- See how same story is covered differently globally
+
+### Sources Unlocked
+| Region | Sources |
+|--------|---------|
+| China | Xinhua, Global Times, SCMP |
+| Russia | TASS, Interfax |
+| Middle East | Al Jazeera Arabic, Haaretz |
+| Europe | Le Monde, Der Spiegel, Corriere |
+| Japan | NHK, Asahi, Nikkei |
+| Brazil | Folha, O Globo |
+| India | Hindi outlets |
+
+### Implementation Options
+
+1. **MCP Translation Server**
+   - Local: Ollama with translation model
+   - API: DeepL, Google Translate, Azure
+   - Hybrid: Local for speed, API for quality
+
+2. **On-Demand vs Pre-Translate**
+   - Pre-translate: Everything indexed in English
+   - On-demand: Translate when user views
+   - Hybrid: Pre-translate titles, on-demand for content
+
+3. **Normalization**
+   - Dates/times to user's timezone
+   - Currency to user's preferred
+   - Measurements (metric/imperial)
+   - Cultural context notes
+
+### Correlation Across Languages
+Same event covered in different languages:
+```
+Thread: "Taiwan Strait Tensions"
+├── Reuters (EN): "US warship transits Taiwan Strait"
+├── Xinhua (ZH→EN): "China condemns provocation"
+├── NHK (JA→EN): "Japan monitoring situation"
+└── Taiwan News (EN): "Coast guard on alert"
+```
+
+See how different regions frame the same story.
+
+---
+
 ## Data Sources to Add
 
 ### High Priority
