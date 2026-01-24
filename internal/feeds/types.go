@@ -6,13 +6,15 @@ import "time"
 type SourceType string
 
 const (
-	SourceRSS       SourceType = "rss"
-	SourceReddit    SourceType = "reddit"
-	SourceHN        SourceType = "hn"
-	SourceTwitter   SourceType = "twitter"
-	SourceUSGS      SourceType = "usgs"
-	SourceMastodon  SourceType = "mastodon"
-	SourceBluesky   SourceType = "bluesky"
+	SourceRSS        SourceType = "rss"
+	SourceReddit     SourceType = "reddit"
+	SourceHN         SourceType = "hn"
+	SourceTwitter    SourceType = "twitter"
+	SourceUSGS       SourceType = "usgs"
+	SourceMastodon   SourceType = "mastodon"
+	SourceBluesky    SourceType = "bluesky"
+	SourcePolymarket SourceType = "polymarket"
+	SourceManifold   SourceType = "manifold"
 )
 
 // Item represents a single piece of content from any source

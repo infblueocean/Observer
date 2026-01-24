@@ -12,6 +12,8 @@ import (
 	"github.com/abelbrown/observer/internal/curation"
 	"github.com/abelbrown/observer/internal/feeds"
 	"github.com/abelbrown/observer/internal/feeds/hackernews"
+	"github.com/abelbrown/observer/internal/feeds/manifold"
+	"github.com/abelbrown/observer/internal/feeds/polymarket"
 	"github.com/abelbrown/observer/internal/feeds/rss"
 	"github.com/abelbrown/observer/internal/feeds/usgs"
 	"github.com/abelbrown/observer/internal/store"
@@ -103,6 +105,20 @@ func New() Model {
 	agg.AddSource(usgs.NewM45Week(), feeds.RSSFeedConfig{
 		Name:           "USGS M4.5+",
 		Category:       "events",
+		RefreshMinutes: feeds.RefreshNormal,
+		Weight:         1.2,
+	})
+
+	// Add Prediction Markets
+	agg.AddSource(polymarket.New(), feeds.RSSFeedConfig{
+		Name:           "Polymarket",
+		Category:       "predictions",
+		RefreshMinutes: feeds.RefreshNormal,
+		Weight:         1.3,
+	})
+	agg.AddSource(manifold.New(), feeds.RSSFeedConfig{
+		Name:           "Manifold",
+		Category:       "predictions",
 		RefreshMinutes: feeds.RefreshNormal,
 		Weight:         1.2,
 	})
