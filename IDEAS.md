@@ -370,15 +370,55 @@ See how different regions frame the same story.
 
 ---
 
+## Anonymous Feed Principle
+
+**Core Design Decision:** Observer should only use anonymous, public feeds that require no login or tracking.
+
+### Why This Matters
+
+1. **No behavioral exhaust** - No account = no tracking of what you read
+2. **No dependency** - No API keys to revoke, no ToS changes
+3. **Portable** - Anyone can run Observer without signing up for anything
+4. **Aligned with ethos** - "You own your attention" means no one knows what you're reading
+
+### What Qualifies as "Anonymous"
+
+| OK | Not OK |
+|----|--------|
+| Public RSS feeds | OAuth-gated APIs |
+| `.rss` suffix on Reddit | Reddit API (needs OAuth) |
+| Unauthenticated JSON APIs | Twitter/X API (paywalled) |
+| Public firehose feeds | Personalized feeds |
+
+### Current Anonymous Aggregators
+
+- **Techmeme** - Human+algo tech curation, firehose RSS available
+- **Memeorandum** - Same creator, politics aggregation
+- **AllSides** - Balanced news with bias ratings
+- **Google News** - Public RSS (though links route through Google)
+- **Reddit** - Any public subreddit via `.rss` suffix
+- **Lobsters** - Tech, invite-only community but public RSS
+
+### Aggregators That Require Accounts (Avoid)
+
+- Ground News (now paywalled)
+- Feedly (account-based)
+- Flipboard (account for full features)
+- Inoreader (account-based)
+
+---
+
 ## Data Sources to Add
 
-### High Priority
-- [ ] Reddit API (OAuth required, 100 req/min)
-- [ ] Mastodon public timeline (no auth!)
-- [ ] Bluesky public API
-- [ ] ArXiv (academic papers)
-- [ ] SEC EDGAR (corporate filings)
-- [ ] Wikipedia EventStreams (real-time edits)
+### High Priority (Anonymous)
+- [x] Reddit public subreddits (via .rss - no OAuth!)
+- [x] Bluesky native RSS (profile/rss - no auth!)
+- [x] ArXiv (cs.AI, cs.LG, cs.CL, cs.CV, cs.CR, econ, physics)
+- [x] SEC EDGAR (Latest, 8-K, 10-K filings - public atom feeds)
+- [x] Techmeme + Memeorandum + AllSides aggregators
+- [x] Google News RSS (topics)
+- [ ] Mastodon public timeline (via Open RSS or native)
+- [ ] Wikipedia EventStreams (real-time edits - public)
 
 ### Medium Priority
 - [ ] Kalshi prediction markets (CFTC-regulated)

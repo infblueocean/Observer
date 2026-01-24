@@ -51,6 +51,57 @@ var DefaultRSSFeeds = []RSSFeedConfig{
 	{Name: "Sydney Morning Herald", URL: "https://www.smh.com.au/rss/feed.xml", Category: "newspaper-intl", RefreshMinutes: RefreshHourly, Weight: 1.0},
 
 	// ============================================
+	// AGGREGATORS (Anonymous - no login required)
+	// These are curated views from other aggregators we can tap anonymously
+	// ============================================
+	{Name: "Techmeme", URL: "https://www.techmeme.com/feed.xml", Category: "aggregator", RefreshMinutes: RefreshNormal, Weight: 1.4},
+	{Name: "Techmeme Firehose", URL: "https://www.techmeme.com/firehose.xml", Category: "aggregator", RefreshMinutes: RefreshFast, Weight: 1.2},
+	{Name: "Memeorandum", URL: "https://www.memeorandum.com/feed.xml", Category: "aggregator", RefreshMinutes: RefreshNormal, Weight: 1.3},
+	{Name: "AllSides", URL: "https://www.allsides.com/news/rss", Category: "aggregator", RefreshMinutes: RefreshSlow, Weight: 1.2},
+	{Name: "Google News Top", URL: "https://news.google.com/rss", Category: "aggregator", RefreshMinutes: RefreshNormal, Weight: 1.0},
+	{Name: "Google News World", URL: "https://news.google.com/rss/topics/CAAqJggKIiBDQkFTRWdvSUwyMHZNRGx1YlY4U0FtVnVHZ0pWVXlnQVAB", Category: "aggregator", RefreshMinutes: RefreshNormal, Weight: 1.0},
+	{Name: "Google News Tech", URL: "https://news.google.com/rss/topics/CAAqJggKIiBDQkFTRWdvSUwyMHZNRGRqTVhZU0FtVnVHZ0pWVXlnQVAB", Category: "aggregator", RefreshMinutes: RefreshNormal, Weight: 1.0},
+	{Name: "Google News Sci", URL: "https://news.google.com/rss/topics/CAAqJggKIiBDQkFTRWdvSUwyMHZNRFp0Y1RjU0FtVnVHZ0pWVXlnQVAB", Category: "aggregator", RefreshMinutes: RefreshLazy, Weight: 1.0},
+
+	// ============================================
+	// REDDIT PUBLIC (Anonymous via .rss suffix)
+	// ============================================
+	{Name: "r/worldnews", URL: "https://www.reddit.com/r/worldnews/top/.rss?limit=25", Category: "reddit", RefreshMinutes: RefreshSlow, Weight: 1.1},
+	{Name: "r/technology", URL: "https://www.reddit.com/r/technology/hot/.rss?limit=25", Category: "reddit", RefreshMinutes: RefreshSlow, Weight: 1.0},
+	{Name: "r/science", URL: "https://www.reddit.com/r/science/hot/.rss?limit=25", Category: "reddit", RefreshMinutes: RefreshSlow, Weight: 1.0},
+	{Name: "r/programming", URL: "https://www.reddit.com/r/programming/hot/.rss?limit=25", Category: "reddit", RefreshMinutes: RefreshSlow, Weight: 1.0},
+	{Name: "r/MachineLearning", URL: "https://www.reddit.com/r/MachineLearning/hot/.rss?limit=25", Category: "reddit", RefreshMinutes: RefreshLazy, Weight: 1.1},
+	{Name: "r/LocalLLaMA", URL: "https://www.reddit.com/r/LocalLLaMA/hot/.rss?limit=25", Category: "reddit", RefreshMinutes: RefreshLazy, Weight: 1.1},
+	{Name: "r/singularity", URL: "https://www.reddit.com/r/singularity/hot/.rss?limit=25", Category: "reddit", RefreshMinutes: RefreshLazy, Weight: 1.0},
+	{Name: "r/Futurology", URL: "https://www.reddit.com/r/Futurology/hot/.rss?limit=25", Category: "reddit", RefreshMinutes: RefreshLazy, Weight: 0.9},
+	{Name: "r/geopolitics", URL: "https://www.reddit.com/r/geopolitics/top/.rss?limit=25", Category: "reddit", RefreshMinutes: RefreshLazy, Weight: 1.2},
+	{Name: "r/Economics", URL: "https://www.reddit.com/r/Economics/hot/.rss?limit=25", Category: "reddit", RefreshMinutes: RefreshLazy, Weight: 1.0},
+
+	// ============================================
+	// BLUESKY PUBLIC (Native RSS, no auth)
+	// ============================================
+	{Name: "Bluesky Official", URL: "https://bsky.app/profile/bsky.app/rss", Category: "bluesky", RefreshMinutes: RefreshLazy, Weight: 1.0},
+	{Name: "Bluesky Engineering", URL: "https://bsky.app/profile/atproto.com/rss", Category: "bluesky", RefreshMinutes: RefreshLazy, Weight: 1.1},
+
+	// ============================================
+	// ARXIV (Academic preprints - public, no auth)
+	// ============================================
+	{Name: "arXiv cs.AI", URL: "https://rss.arxiv.org/rss/cs.AI", Category: "arxiv", RefreshMinutes: RefreshHourly, Weight: 1.3},
+	{Name: "arXiv cs.LG", URL: "https://rss.arxiv.org/rss/cs.LG", Category: "arxiv", RefreshMinutes: RefreshHourly, Weight: 1.3},
+	{Name: "arXiv cs.CL", URL: "https://rss.arxiv.org/rss/cs.CL", Category: "arxiv", RefreshMinutes: RefreshHourly, Weight: 1.2},
+	{Name: "arXiv cs.CV", URL: "https://rss.arxiv.org/rss/cs.CV", Category: "arxiv", RefreshMinutes: RefreshHourly, Weight: 1.1},
+	{Name: "arXiv cs.CR", URL: "https://rss.arxiv.org/rss/cs.CR", Category: "arxiv", RefreshMinutes: RefreshHourly, Weight: 1.2},
+	{Name: "arXiv econ.GN", URL: "https://rss.arxiv.org/rss/econ.GN", Category: "arxiv", RefreshMinutes: RefreshHourly, Weight: 1.0},
+	{Name: "arXiv physics", URL: "https://rss.arxiv.org/rss/physics", Category: "arxiv", RefreshMinutes: RefreshHourly, Weight: 1.0},
+
+	// ============================================
+	// SEC EDGAR (Public filings - no auth, 10 req/sec limit)
+	// ============================================
+	{Name: "SEC Latest Filings", URL: "https://www.sec.gov/cgi-bin/browse-edgar?action=getcurrent&type=&company=&dateb=&owner=include&count=40&output=atom", Category: "sec", RefreshMinutes: RefreshSlow, Weight: 1.0},
+	{Name: "SEC 8-K Filings", URL: "https://www.sec.gov/cgi-bin/browse-edgar?action=getcurrent&type=8-K&company=&dateb=&owner=include&count=40&output=atom", Category: "sec", RefreshMinutes: RefreshSlow, Weight: 1.1},
+	{Name: "SEC 10-K Filings", URL: "https://www.sec.gov/cgi-bin/browse-edgar?action=getcurrent&type=10-K&company=&dateb=&owner=include&count=40&output=atom", Category: "sec", RefreshMinutes: RefreshLazy, Weight: 1.0},
+
+	// ============================================
 	// TECH NEWS (Fast refresh - moves quickly)
 	// ============================================
 	{Name: "Hacker News", URL: "https://news.ycombinator.com/rss", Category: "tech", RefreshMinutes: RefreshFast, Weight: 1.3},
@@ -182,6 +233,11 @@ type RSSFeedConfig struct {
 // Categories returns all unique categories
 func Categories() []string {
 	return []string{
+		"aggregator", // Anonymous third-party aggregators (Techmeme, etc)
+		"reddit",     // Reddit public subreddits (no login via .rss)
+		"bluesky",    // Bluesky native RSS (no auth)
+		"arxiv",      // Academic preprints (public)
+		"sec",        // SEC EDGAR filings (public)
 		"wire",
 		"tv-us",
 		"newspaper-us",

@@ -7,14 +7,17 @@ type SourceType string
 
 const (
 	SourceRSS        SourceType = "rss"
-	SourceReddit     SourceType = "reddit"
-	SourceHN         SourceType = "hn"
-	SourceTwitter    SourceType = "twitter"
-	SourceUSGS       SourceType = "usgs"
-	SourceMastodon   SourceType = "mastodon"
-	SourceBluesky    SourceType = "bluesky"
-	SourcePolymarket SourceType = "polymarket"
-	SourceManifold   SourceType = "manifold"
+	SourceReddit     SourceType = "reddit"    // Public subreddit RSS
+	SourceHN         SourceType = "hn"        // Hacker News API
+	SourceTwitter    SourceType = "twitter"   // (Deprecated - requires auth)
+	SourceUSGS       SourceType = "usgs"      // Earthquake data
+	SourceMastodon   SourceType = "mastodon"  // Public timeline RSS
+	SourceBluesky    SourceType = "bluesky"   // Native RSS feeds
+	SourceArXiv      SourceType = "arxiv"     // Academic preprints
+	SourceSEC        SourceType = "sec"       // SEC EDGAR filings
+	SourceAggregator SourceType = "aggregator" // Third-party aggregators
+	SourcePolymarket SourceType = "polymarket" // Prediction market
+	SourceManifold   SourceType = "manifold"   // Prediction market
 )
 
 // Item represents a single piece of content from any source
