@@ -33,6 +33,84 @@ var categoryColors = map[string]lipgloss.Color{
 	"bluesky":        lipgloss.Color("#58a6ff"), // blue
 }
 
+// Source abbreviations - shorter, more recognizable than truncation
+var sourceAbbrevs = map[string]string{
+	"Hacker News":        "HN",
+	"r/MachineLearning":  "r/ML",
+	"r/LocalLLaMA":       "r/LocalLLM",
+	"r/programming":      "r/prog",
+	"r/technology":       "r/tech",
+	"r/worldnews":        "r/world",
+	"r/singularity":      "r/singul",
+	"r/Futurology":       "r/future",
+	"r/geopolitics":      "r/geopol",
+	"r/Economics":        "r/econ",
+	"South China MP":     "SCMP",
+	"Sydney Morning Herald": "SMH",
+	"Washington Post":    "WaPo",
+	"Wall St Journal":    "WSJ",
+	"NY Times":           "NYT",
+	"NY Times World":     "NYT World",
+	"Financial Times":    "FT",
+	"Google News Top":    "GNews",
+	"Google News World":  "GN World",
+	"Google News Tech":   "GN Tech",
+	"Google News Sci":    "GN Sci",
+	"Scientific American": "SciAm",
+	"MIT AI News":        "MIT AI",
+	"Krebs on Security":  "Krebs",
+	"Schneier on Security": "Schneier",
+	"The Hacker News":    "THN",
+	"Bleeping Computer":  "BleepCo",
+	"Hollywood Reporter": "THR",
+	"Rolling Stone":      "RollingS",
+	"USGS Significant":   "USGS",
+	"USGS M4.5+":         "USGS 4.5",
+}
+
+// Time bands for grouping
+type timeBand int
+
+const (
+	bandJustNow   timeBand = iota // < 10 minutes
+	bandPastHour                  // < 1 hour
+	bandToday                     // < 24 hours
+	bandYesterday                 // < 48 hours
+	bandOlder                     // everything else
+)
+
+func getTimeBand(published time.Time) timeBand {
+	age := time.Since(published)
+	switch {
+	case age < 10*time.Minute:
+		return bandJustNow
+	case age < time.Hour:
+		return bandPastHour
+	case age < 24*time.Hour:
+		return bandToday
+	case age < 48*time.Hour:
+		return bandYesterday
+	default:
+		return bandOlder
+	}
+}
+
+func bandLabel(band timeBand) string {
+	switch band {
+	case bandJustNow:
+		return "Just Now"
+	case bandPastHour:
+		return "Past Hour"
+	case bandToday:
+		return "Earlier Today"
+	case bandYesterday:
+		return "Yesterday"
+	case bandOlder:
+		return "Older"
+	}
+	return ""
+}
+
 // Model is the stream view showing feed items flowing by
 type Model struct {
 	items      []feeds.Item
@@ -112,7 +190,7 @@ func (m *Model) MarkSelectedRead() {
 	}
 }
 
-// Spinner returns a command to tick the spinner
+// Spinner returns the spinner model
 func (m Model) Spinner() spinner.Model {
 	return m.spinner
 }
@@ -154,32 +232,67 @@ func (m Model) renderEmpty() string {
 func (m Model) renderItems() string {
 	var lines []string
 
-	// Calculate visible range with some padding
-	linesPerItem := 2 // title + spacing
-	visibleItems := (m.height - 2) / linesPerItem
-	if visibleItems < 1 {
-		visibleItems = 1
-	}
+	// Calculate how many lines we can show
+	availableHeight := m.height - 2 // Leave room for scroll indicator
 
-	startIdx := 0
-	if m.cursor > visibleItems/2 {
-		startIdx = m.cursor - visibleItems/2
+	// Build all renderable lines with their item indices
+	type renderedLine struct {
+		content   string
+		itemIndex int // -1 for dividers/spacing
 	}
-	endIdx := min(startIdx+visibleItems, len(m.items))
-	if endIdx-startIdx < visibleItems && startIdx > 0 {
-		startIdx = max(0, endIdx-visibleItems)
-	}
+	var allLines []renderedLine
 
-	for i := startIdx; i < endIdx; i++ {
-		item := m.items[i]
+	currentBand := timeBand(-1)
+	for i, item := range m.items {
+		band := getTimeBand(item.Published)
+
+		// Add time band divider if band changed
+		if band != currentBand {
+			if currentBand != -1 {
+				// Blank line before new band (breathing room)
+				allLines = append(allLines, renderedLine{"", -1})
+			}
+			// Time band divider
+			divider := m.renderTimeBandDivider(band)
+			allLines = append(allLines, renderedLine{divider, -1})
+			currentBand = band
+		}
+
+		// Render the item
 		selected := i == m.cursor
-		lines = append(lines, m.renderItem(item, selected))
+		line := m.renderItem(item, selected)
+		allLines = append(allLines, renderedLine{line, i})
+	}
+
+	// Find the line index where cursor item is
+	cursorLineIdx := 0
+	for i, rl := range allLines {
+		if rl.itemIndex == m.cursor {
+			cursorLineIdx = i
+			break
+		}
+	}
+
+	// Calculate visible range centered on cursor
+	startLine := cursorLineIdx - availableHeight/2
+	if startLine < 0 {
+		startLine = 0
+	}
+	endLine := startLine + availableHeight
+	if endLine > len(allLines) {
+		endLine = len(allLines)
+		startLine = max(0, endLine-availableHeight)
+	}
+
+	// Collect visible lines
+	for i := startLine; i < endLine; i++ {
+		lines = append(lines, allLines[i].content)
 	}
 
 	// Scroll indicator
 	scrollInfo := ""
-	if len(m.items) > visibleItems {
-		pct := float64(m.cursor) / float64(len(m.items)-1) * 100
+	if len(m.items) > 0 {
+		pct := float64(m.cursor) / float64(max(1, len(m.items)-1)) * 100
 		scrollInfo = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("#484f58")).
 			Render(fmt.Sprintf(" %d/%d (%.0f%%)", m.cursor+1, len(m.items), pct))
@@ -193,11 +306,38 @@ func (m Model) renderItems() string {
 	return content
 }
 
+func (m Model) renderTimeBandDivider(band timeBand) string {
+	label := bandLabel(band)
+
+	// Style: muted, unobtrusive
+	labelStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#484f58"))
+
+	lineStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#30363d"))
+
+	// Calculate line widths
+	labelWidth := len(label) + 2 // padding
+	totalWidth := m.width - 4
+	leftLineWidth := 3
+	rightLineWidth := totalWidth - leftLineWidth - labelWidth
+	if rightLineWidth < 0 {
+		rightLineWidth = 0
+	}
+
+	leftLine := lineStyle.Render(strings.Repeat("─", leftLineWidth))
+	rightLine := lineStyle.Render(strings.Repeat("─", rightLineWidth))
+	labelText := labelStyle.Render(" " + label + " ")
+
+	return fmt.Sprintf("  %s%s%s", leftLine, labelText, rightLine)
+}
+
 func (m Model) renderItem(item feeds.Item, selected bool) string {
 	// Get category color
 	category := m.categories[item.ID]
 	if category == "" {
-		category = string(item.Source)
+		// Try to derive from source type or name
+		category = deriveCategoryFromSource(item.SourceName, string(item.Source))
 	}
 	catColor, ok := categoryColors[category]
 	if !ok {
@@ -208,56 +348,75 @@ func (m Model) renderItem(item feeds.Item, selected bool) string {
 	age := time.Since(item.Published)
 	timeStr := formatAge(age)
 
+	// Source name - use abbreviation if available, otherwise smart truncate
+	sourceName := getSourceAbbrev(item.SourceName)
+
 	// Source badge with category color
 	sourceBadge := lipgloss.NewStyle().
 		Foreground(lipgloss.Color("#0d1117")).
 		Background(catColor).
 		Padding(0, 1).
-		Bold(true).
-		Render(truncate(item.SourceName, 12))
+		Render(sourceName)
 
-	// Time stamp
+	// Time stamp - right side, muted
 	timeStyle := lipgloss.NewStyle().
 		Foreground(lipgloss.Color("#484f58"))
 
-	// "Fresh" indicator for items < 30min old
+	// Fresh indicator - only for < 10 minutes (make it meaningful)
 	freshIndicator := ""
-	if age < 30*time.Minute {
+	if age < 10*time.Minute {
 		freshIndicator = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("#3fb950")).
+			Bold(true).
 			Render(" ●")
 	}
 
 	// Title
-	maxTitleWidth := m.width - lipgloss.Width(sourceBadge) - 15
+	badgeWidth := lipgloss.Width(sourceBadge)
+	timeWidth := len(timeStr) + 2
+	freshWidth := 0
+	if freshIndicator != "" {
+		freshWidth = 3
+	}
+	maxTitleWidth := m.width - badgeWidth - timeWidth - freshWidth - 8
+	if maxTitleWidth < 20 {
+		maxTitleWidth = 20
+	}
 	title := truncate(item.Title, maxTitleWidth)
 
 	// Build the line based on state
 	if selected {
-		// Selected: highlighted background, accent border
+		// Selected: highlighted background, accent border, brighter text
 		titleStyle := lipgloss.NewStyle().
 			Foreground(lipgloss.Color("#ffffff")).
 			Bold(true)
 
+		// Container with left border in category color
+		line := fmt.Sprintf("%s  %s%s",
+			sourceBadge,
+			titleStyle.Render(title),
+			freshIndicator)
+
+		// Pad and add time on right
+		lineWidth := lipgloss.Width(line)
+		padding := m.width - lineWidth - len(timeStr) - 6
+		if padding < 1 {
+			padding = 1
+		}
+		line += strings.Repeat(" ", padding) + timeStyle.Render(timeStr)
+
 		containerStyle := lipgloss.NewStyle().
-			Background(lipgloss.Color("#21262d")).
+			Background(lipgloss.Color("#1c2128")).
 			BorderLeft(true).
 			BorderStyle(lipgloss.ThickBorder()).
 			BorderForeground(catColor).
-			Padding(0, 1).
 			Width(m.width - 2)
-
-		line := fmt.Sprintf("%s  %s%s  %s",
-			sourceBadge,
-			titleStyle.Render(title),
-			freshIndicator,
-			timeStyle.Render(timeStr))
 
 		return containerStyle.Render(line)
 	}
 
 	if item.Read {
-		// Read: dimmed
+		// Read: dimmed everything
 		titleStyle := lipgloss.NewStyle().
 			Foreground(lipgloss.Color("#484f58"))
 
@@ -265,27 +424,75 @@ func (m Model) renderItem(item feeds.Item, selected bool) string {
 			Foreground(lipgloss.Color("#484f58")).
 			Background(lipgloss.Color("#21262d")).
 			Padding(0, 1).
-			Render(truncate(item.SourceName, 12))
+			Render(sourceName)
 
-		line := fmt.Sprintf("  %s  %s  %s",
-			dimBadge,
-			titleStyle.Render(title),
-			timeStyle.Render(timeStr))
+		line := fmt.Sprintf("  %s  %s", dimBadge, titleStyle.Render(title))
 
-		return line
+		lineWidth := lipgloss.Width(line)
+		padding := m.width - lineWidth - len(timeStr) - 4
+		if padding < 1 {
+			padding = 1
+		}
+		return line + strings.Repeat(" ", padding) + timeStyle.Render(timeStr)
 	}
 
 	// Normal: clean, readable
 	titleStyle := lipgloss.NewStyle().
 		Foreground(lipgloss.Color("#c9d1d9"))
 
-	line := fmt.Sprintf("  %s  %s%s  %s",
+	line := fmt.Sprintf("  %s  %s%s",
 		sourceBadge,
 		titleStyle.Render(title),
-		freshIndicator,
-		timeStyle.Render(timeStr))
+		freshIndicator)
 
-	return line
+	lineWidth := lipgloss.Width(line)
+	padding := m.width - lineWidth - len(timeStr) - 4
+	if padding < 1 {
+		padding = 1
+	}
+	return line + strings.Repeat(" ", padding) + timeStyle.Render(timeStr)
+}
+
+func getSourceAbbrev(name string) string {
+	if abbrev, ok := sourceAbbrevs[name]; ok {
+		return abbrev
+	}
+	// Smart truncation: keep it readable
+	if len(name) > 12 {
+		// Try to find a natural break point
+		if idx := strings.Index(name, " "); idx > 0 && idx < 10 {
+			return name[:idx]
+		}
+		return name[:10] + ".."
+	}
+	return name
+}
+
+func deriveCategoryFromSource(sourceName, sourceType string) string {
+	// Try to derive category from source name patterns
+	nameLower := strings.ToLower(sourceName)
+
+	switch {
+	case strings.HasPrefix(nameLower, "r/"):
+		return "reddit"
+	case strings.Contains(nameLower, "arxiv"):
+		return "arxiv"
+	case strings.Contains(nameLower, "sec ") || strings.Contains(nameLower, "edgar"):
+		return "sec"
+	case strings.Contains(nameLower, "polymarket") || strings.Contains(nameLower, "manifold"):
+		return "predictions"
+	case strings.Contains(nameLower, "usgs"):
+		return "events"
+	case strings.Contains(nameLower, "google news"):
+		return "aggregator"
+	case strings.Contains(nameLower, "techmeme") || strings.Contains(nameLower, "memeorandum"):
+		return "aggregator"
+	case sourceType == "hn":
+		return "tech"
+	}
+
+	// Default based on source type
+	return sourceType
 }
 
 func formatAge(d time.Duration) string {
@@ -313,7 +520,7 @@ func truncate(s string, maxLen int) string {
 	if maxLen <= 3 {
 		return s[:maxLen]
 	}
-	return s[:maxLen-3] + "..."
+	return s[:maxLen-2] + ".."
 }
 
 func max(a, b int) int {
