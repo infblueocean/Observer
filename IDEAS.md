@@ -113,11 +113,11 @@ Based on the research, here are our guiding principles:
 - [x] Fresh indicator only for < 10 minutes (make it meaningful)
 - [x] Better source abbreviations: HN, NYT, WaPo, WSJ, SCMP, SMH, r/ML, etc.
 
-#### Phase 2: Hierarchy & Expansion
-- [ ] Selected item shows 1-line summary below title
-- [ ] Importance indicator for multi-source stories
-- [ ] "Breaking" visual treatment for wire service alerts
-- [ ] Subtle dimming for items > 24 hours old
+#### Phase 2: Hierarchy & Expansion ✓ DONE
+- [x] Selected item shows 1-line summary below title (with HTML entity decoding)
+- [ ] Importance indicator for multi-source stories (needs correlation engine)
+- [x] "Breaking" visual treatment: ⚡ indicator + red badge for wire < 30min
+- [x] Subtle dimming for items > 24 hours old (title + timestamp)
 
 #### Phase 3: Sparklines & Trends
 - [ ] Prediction market: tiny probability sparkline
