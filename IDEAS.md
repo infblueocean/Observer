@@ -4,6 +4,183 @@ This document captures ideas as they emerge. Some are implemented, some are plan
 
 ---
 
+## Beautiful Living Feed - Design Research & Vision
+
+### The Problem (Current State)
+The current stream is a "wall of text" - high information density but no visual hierarchy, no breathing room, no rhythm. Every item looks equally important. The eye has nowhere to rest.
+
+### Research Foundation
+
+#### Edward Tufte's Data Visualization Principles
+Source: [Tufte's Principles](https://thedoublethink.com/tuftes-principles-for-visualizing-quantitative-information/)
+
+- **"Above all else, show the data"** - Don't let decoration obscure information
+- **Data-ink ratio** - Maximize the ink devoted to actual data vs decoration
+- **High data density is OK** - "Our eyes and brains are capable of processing large amounts of information if presented clearly"
+- **Chartjunk** - Eliminate useless, non-informative visual elements
+- **Small multiples** - Miniature illustrations arrayed as single figure
+- **Sparklines** - "Data-intense, design-simple, word-sized graphics"
+
+**Application to Observer:** We CAN show dense information, but it must be organized. Every pixel should serve a purpose. No decoration for decoration's sake.
+
+#### Cognitive Load & Eye Tracking Research
+Source: [Eye Tracking for Cognitive Load](https://dl.acm.org/doi/10.1145/2993901.2993908), [NN/g Eye Tracking](https://www.interaction-design.org/literature/topics/eye-tracking)
+
+- **Pupil dilation** indicates cognitive effort - complex UIs cause measurable strain
+- **Fixations** - where eyes stop and focus; good design guides fixations
+- **Saccades** - rapid eye movements between fixations; chaotic saccades = poor hierarchy
+- **Key finding:** "Well-designed interfaces feature high visual contrast, intuitive iconography, clear typography, and well-structured interactive elements"
+- **Goal:** "Efficiently guide user attention, reduce cognitive load, support task completion"
+
+**Application to Observer:** Create clear visual hierarchy so eyes know where to go. Use contrast and whitespace to guide attention. Reduce saccade chaos.
+
+#### Gestalt Principles (Proximity & Grouping)
+Source: [NN/g Proximity Principle](https://www.nngroup.com/articles/gestalt-proximity/), [Figma Gestalt Principles](https://www.figma.com/resource-library/gestalt-principles/)
+
+- **Proximity principle** - "Items close together are perceived as part of the same group"
+- **Proximity overpowers color/shape** - Grouping by space is stronger than grouping by appearance
+- **No borders needed** - "Proximity can create implicit relationships without explicit borders"
+- **Whitespace is structural** - "Using varying amounts of whitespace to unite or separate elements is key to communicating meaningful groupings"
+- **Users scan quickly** - "Making groupings visually obvious increases usability"
+
+**Application to Observer:** Group items by time period, category, or importance using whitespace - not borders. Let proximity do the heavy lifting.
+
+#### Information Scent Theory
+Source: [NN/g Information Scent](https://www.nngroup.com/articles/information-scent/), [News Cues Research](https://www.bellisario.psu.edu/medialab/research-article/news-cues-information-scent-and-cognitive-heuristics)
+
+- **Information foraging** - Users behave like animals hunting for food, following "scent"
+- **Three key news cues:** (1) Source name, (2) Recency/time, (3) Related article count
+- **Heuristic processing** - Cues are processed as mental shortcuts, not deeply analyzed
+- **Context early** - "Too often landing pages don't provide enough context soon enough"
+- **Attention-getting potential** - Placement, layout, and color direct traffic
+
+**Application to Observer:** Optimize the three cues: source (badge), recency (time), corroboration (multiple sources). Make them scannable heuristics.
+
+#### TUI-Specific Design Principles
+Source: [Brandur on Terminal Interfaces](https://brandur.org/interfaces), [Charm Libraries](https://charm.sh)
+
+- **Speed over aesthetics** - "A successful interface maximizes productivity and lets us keep moving"
+- **Legibility first** - "Legibility and whitespace are great, but vanishing importance compared to speed"
+- **Purpose-fit layouts** - TUIs can "situate themselves in purpose-fit layouts and controls"
+- **Modern terminals** - Support 16.7 million colors, mouse, smooth animation
+- **Theme separation** - Centralized theme class separates presentation from styling
+
+**Application to Observer:** Embrace terminal constraints as features. Speed is paramount. Colors should be meaningful, not decorative.
+
+---
+
+### Design Principles for Observer Stream
+
+Based on the research, here are our guiding principles:
+
+#### 1. Meaningful Density (Tufte)
+- High information density is good IF organized
+- Every visual element must earn its place
+- Source badges, timestamps, titles = data. Decorative borders = chartjunk.
+- Consider sparklines for trends (prediction market probabilities over time)
+
+#### 2. Visual Hierarchy (Cognitive Load)
+- Three levels: **Urgent** (breaking, alerts) → **Fresh** (< 1hr) → **Archive** (older)
+- Selected item should expand slightly, show summary
+- Unread vs read must be clearly distinct
+- Category colors provide quick classification without reading
+
+#### 3. Proximity Grouping (Gestalt)
+- Group by time bands: "Just now", "Past hour", "Earlier today", "Yesterday"
+- Whitespace between groups, not borders
+- Related items (same story, multiple sources) cluster together
+- No need for heavy dividers - space implies structure
+
+#### 4. Strong Scent (Information Foraging)
+- **Source** - Colored badge, recognizable abbreviation
+- **Recency** - Relative time, prominent for fresh items
+- **Corroboration** - "3 sources" indicator for multi-source stories
+- All three visible at a glance, processed heuristically
+
+#### 5. Speed & Responsiveness (TUI)
+- Sub-frame response to keystrokes
+- No animation that blocks interaction
+- Instant scroll, instant selection feedback
+- Loading states should be brief and informative
+
+---
+
+### Concrete Improvements (Prioritized)
+
+#### Phase 1: Breathing Room (Quick Wins)
+- [ ] Time band dividers: "━━━ Past Hour ━━━" with muted styling
+- [ ] 1 blank line between time bands (proximity grouping)
+- [ ] Fresh indicator only for < 10 minutes (make it meaningful)
+- [ ] Better source abbreviations (not truncation)
+
+#### Phase 2: Hierarchy & Expansion
+- [ ] Selected item shows 1-line summary below title
+- [ ] Importance indicator for multi-source stories
+- [ ] "Breaking" visual treatment for wire service alerts
+- [ ] Subtle dimming for items > 24 hours old
+
+#### Phase 3: Sparklines & Trends
+- [ ] Prediction market: tiny probability sparkline
+- [ ] Entity timeline: "▁▂▃▅▇ 47 mentions" inline
+- [ ] Source activity: heartbeat indicator for active sources
+
+#### Phase 4: Adaptive Density
+- [ ] "Compact" vs "Comfortable" view toggle
+- [ ] Auto-adjust based on terminal height
+- [ ] Collapse read items to single line
+
+---
+
+### Visual Mockup (ASCII)
+
+```
+◉ OBSERVER │ 97 sources │ 2,847 items │ 82 blocked
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  ─── Just Now ───────────────────────────────────
+
+┃ Reuters      Fed announces emergency rate cut      ● 2m
+│              Markets react with sharp rally...
+│              ◆ 4 sources covering this story
+
+  AP News      Breaking: Fed cuts rates by 50bp       3m
+  BBC World    Federal Reserve makes surprise move    4m
+
+  ─── Past Hour ──────────────────────────────────
+
+  r/MachineLearning  Claude 4 released, benchmarks... 15m
+  Hacker News        Show HN: I built a feed reader   23m
+  TechCrunch         OpenAI responds to Anthropic...  31m
+
+  ─── Earlier Today ──────────────────────────────
+
+  NY Times     Analysis: What the Fed move means     2h
+  The Atlantic The Age of Instant Information       3h
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+↑↓ navigate  /commands  enter expand  q quit   1/2847
+```
+
+**Design notes:**
+- Time bands use proximity (whitespace) not heavy borders
+- Selected item (Fed) has left border + expanded summary + corroboration
+- Fresh items have ● indicator
+- Multi-source stories show "◆ N sources"
+- Timestamps right-aligned, muted
+- Status bar shows position
+
+---
+
+### References
+
+- Tufte, E. (1983). *The Visual Display of Quantitative Information*
+- Card, S. & Pirolli, P. - Information Foraging Theory (PARC)
+- Sundar, S.S. - "News cues: Information scent and cognitive heuristics"
+- Nielsen Norman Group - Gestalt Principles, Information Scent
+- Interaction Design Foundation - Eye Tracking in UX
+
+---
+
 ## Implemented
 
 ### Core
