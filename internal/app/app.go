@@ -17,11 +17,11 @@ import (
 	"github.com/abelbrown/observer/internal/feeds/rss"
 	"github.com/abelbrown/observer/internal/feeds/usgs"
 	"github.com/abelbrown/observer/internal/store"
+	"github.com/abelbrown/observer/internal/ui/command"
 	"github.com/abelbrown/observer/internal/ui/configview"
 	"github.com/abelbrown/observer/internal/ui/filters"
 	"github.com/abelbrown/observer/internal/ui/sources"
 	"github.com/abelbrown/observer/internal/ui/stream"
-	"github.com/abelbrown/observer/internal/ui/styles"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
@@ -44,18 +44,19 @@ type Model struct {
 	filterWorkshop filters.WorkshopModel
 	configView     configview.Model
 	sourcesView    sources.Model
+	cmdPalette     command.Palette
 	filterEngine   *curation.FilterEngine
 	sourceManager  *curation.SourceManager
 	aggregator     *feeds.Aggregator
 	store          *store.Store
 	config         *config.Config
+	itemCategories map[string]string // item ID -> category
 	width          int
 	height         int
-	err            error
-	mode           viewMode // Current view mode
-	showSources    bool     // Toggle source panel
-	commandMode    bool     // For /commands
-	commandBuf     string
+	lastError      error
+	errorTime      time.Time
+	mode           viewMode
+	showSources    bool
 }
 
 // New creates a new app model
@@ -69,7 +70,7 @@ func New() Model {
 		cfg.LoadKeysFromFile(keysPath)
 	}
 	cfg.AutoPopulateFromEnv()
-	cfg.Save() // Persist loaded keys
+	cfg.Save()
 
 	// Initialize store
 	homeDir, _ := os.UserHomeDir()
@@ -78,7 +79,6 @@ func New() Model {
 
 	st, err := store.New(dbPath)
 	if err != nil {
-		// Continue without persistence
 		st = nil
 	}
 
@@ -127,24 +127,29 @@ func New() Model {
 		Weight:         1.2,
 	})
 
-	// Initialize filter engine (no AI evaluator yet - can add later)
+	// Initialize filter engine
 	filterEngine := curation.NewFilterEngine(nil)
 
 	// Initialize source manager
 	configDir := filepath.Join(homeDir, ".observer")
 	sourceManager := curation.NewSourceManager(configDir)
 
+	// Initialize command palette
+	cmdPalette := command.New()
+
 	return Model{
-		stream:        stream.New(),
-		filterView:    filters.New(filterEngine),
-		configView:    configview.New(cfg),
-		sourcesView:   sources.New(sourceManager, feeds.DefaultRSSFeeds),
-		filterEngine:  filterEngine,
-		sourceManager: sourceManager,
-		aggregator:    agg,
-		store:         st,
-		config:        cfg,
-		mode:          modeStream,
+		stream:         stream.New(),
+		filterView:     filters.New(filterEngine),
+		configView:     configview.New(cfg),
+		sourcesView:    sources.New(sourceManager, feeds.DefaultRSSFeeds),
+		cmdPalette:     cmdPalette,
+		filterEngine:   filterEngine,
+		sourceManager:  sourceManager,
+		aggregator:     agg,
+		store:          st,
+		config:         cfg,
+		itemCategories: make(map[string]string),
+		mode:           modeStream,
 	}
 }
 
@@ -168,6 +173,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.updateSourcesView(msg)
 	}
 
+	// Command palette takes priority when active
+	if m.cmdPalette.IsActive() {
+		var cmd tea.Cmd
+		var executed string
+		m.cmdPalette, cmd, executed = m.cmdPalette.Update(msg)
+		if executed != "" {
+			return m.executeCommand(executed)
+		}
+		return m, cmd
+	}
+
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
 		return m.handleKey(msg)
@@ -175,18 +191,25 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-		streamHeight := msg.Height - 4 // Header + status
+		streamHeight := msg.Height - 4
 		if m.showSources {
-			streamHeight -= 3 // Source bar
+			streamHeight -= 3
 		}
 		m.stream.SetSize(msg.Width, streamHeight)
 		m.filterView.SetSize(msg.Width, msg.Height)
+		m.cmdPalette.SetWidth(min(60, msg.Width-4))
 		return m, nil
 
 	case ItemsLoadedMsg:
 		if msg.Err != nil {
-			m.err = msg.Err
+			m.lastError = msg.Err
+			m.errorTime = time.Now()
 		} else {
+			// Track categories for coloring
+			for _, item := range msg.Items {
+				m.itemCategories[item.ID] = msg.Category
+			}
+
 			// Merge new items
 			m.aggregator.MergeItems(msg.Items)
 
@@ -204,6 +227,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case TickMsg:
+		// Clear old errors
+		if m.lastError != nil && time.Since(m.errorTime) > 10*time.Second {
+			m.lastError = nil
+		}
 		return m, tea.Batch(
 			m.refreshDueSources(),
 			m.tickRefresh(),
@@ -214,11 +241,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	// Command mode
-	if m.commandMode {
-		return m.handleCommandKey(msg)
-	}
-
 	switch msg.String() {
 	case "q", "ctrl+c":
 		if m.store != nil {
@@ -241,19 +263,15 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 
 	case "r":
-		// Manual refresh all due sources
 		return m, m.refreshDueSources()
 
 	case "R":
-		// Force refresh ALL sources
 		return m, m.refreshAllSources()
 
 	case "s":
-		// Shuffle
 		m.shuffleItems()
 
 	case "t":
-		// Toggle source panel
 		m.showSources = !m.showSources
 		streamHeight := m.height - 4
 		if m.showSources {
@@ -262,118 +280,84 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.stream.SetSize(m.width, streamHeight)
 
 	case "f":
-		// Open filter view
 		m.mode = modeFilters
 		m.filterView.SetSize(m.width, m.height)
 
 	case "c":
-		// Open config view
 		m.mode = modeConfig
 		m.configView.SetSize(m.width, m.height)
 
 	case "S":
-		// Open sources view (capital S to avoid conflict with shuffle)
 		m.mode = modeSources
 		m.sourcesView.SetSize(m.width, m.height)
 
-	case "/":
-		// Enter command mode
-		m.commandMode = true
-		m.commandBuf = ""
+	case "/", ":":
+		// Open command palette
+		return m, m.cmdPalette.Activate()
 
-	case "1", "2", "3", "4", "5", "6", "7", "8", "9":
-		// Quick sort by category (future)
+	case "?":
+		// TODO: Help overlay
 	}
 
 	return m, nil
 }
 
-func (m *Model) handleCommandKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.String() {
-	case "enter":
-		cmd := m.executeCommand(m.commandBuf)
-		m.commandMode = false
-		m.commandBuf = ""
-		return m, cmd
-
-	case "esc":
-		m.commandMode = false
-		m.commandBuf = ""
-
-	case "backspace":
-		if len(m.commandBuf) > 0 {
-			m.commandBuf = m.commandBuf[:len(m.commandBuf)-1]
-		}
-
-	default:
-		if len(msg.String()) == 1 {
-			m.commandBuf += msg.String()
-		}
-	}
-	return m, nil
-}
-
-func (m *Model) executeCommand(cmd string) tea.Cmd {
+func (m *Model) executeCommand(cmd string) (tea.Model, tea.Cmd) {
 	switch cmd {
 	case "shuffle":
 		m.shuffleItems()
 	case "refresh":
-		return m.refreshAllSources()
+		return m, m.refreshAllSources()
 	case "sources":
-		// /sources opens the source manager (not just toggle panel)
 		m.mode = modeSources
 		m.sourcesView.SetSize(m.width, m.height)
 	case "panel":
-		// /panel toggles the source panel in stream view
 		m.showSources = !m.showSources
-	case "filter", "filters":
+	case "filters", "filter":
 		m.mode = modeFilters
 		m.filterView.SetSize(m.width, m.height)
 	case "config", "settings":
 		m.mode = modeConfig
 		m.configView.SetSize(m.width, m.height)
+	case "help":
+		// TODO: help overlay
+	case "quit", "exit", "q":
+		if m.store != nil {
+			m.store.Close()
+		}
+		return m, tea.Quit
 	}
-	return nil
+	return m, nil
 }
 
 func (m Model) updateFilterView(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 	m.filterView, cmd = m.filterView.Update(msg)
-
-	// Check if user closed the filter view
 	if m.filterView.IsQuitting() {
 		m.mode = modeStream
 		m.filterView.ResetQuitting()
 	}
-
 	return m, cmd
 }
 
 func (m Model) updateConfigView(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 	m.configView, cmd = m.configView.Update(msg)
-
-	// Check if user closed the config view
 	if m.configView.IsQuitting() {
 		m.mode = modeStream
 		m.configView.ResetQuitting()
 	}
-
 	return m, cmd
 }
 
 func (m Model) updateSourcesView(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 	m.sourcesView, cmd = m.sourcesView.Update(msg)
-
-	// Check if user closed the sources view
 	if m.sourcesView.IsQuitting() {
 		m.mode = modeStream
 		m.sourcesView.ResetQuitting()
-		// Refresh stream with new source settings
 		m.updateStreamItems()
 	}
-
 	return m, cmd
 }
 
@@ -393,12 +377,19 @@ func (m *Model) updateStreamItems() {
 		return items[i].Published.After(items[j].Published)
 	})
 
+	// Set categories for coloring
+	for _, item := range items {
+		if cat, ok := m.itemCategories[item.ID]; ok {
+			m.stream.SetItemCategory(item.ID, cat)
+		}
+	}
+
 	m.stream.SetItems(items)
 }
 
 // View renders the UI
 func (m Model) View() string {
-	// Modal views take over when active
+	// Modal views take over
 	switch m.mode {
 	case modeFilters:
 		return m.filterView.View()
@@ -408,76 +399,147 @@ func (m Model) View() string {
 		return m.sourcesView.View()
 	}
 
-	var sections []string
+	// Styles
+	headerStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#c9d1d9")).
+		Background(lipgloss.Color("#161b22")).
+		Bold(true).
+		Padding(0, 2).
+		Width(m.width)
+
+	statusStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#8b949e")).
+		Background(lipgloss.Color("#0d1117")).
+		Padding(0, 2).
+		Width(m.width)
+
+	errorStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#f85149")).
+		Background(lipgloss.Color("#0d1117")).
+		Padding(0, 2).
+		Width(m.width)
 
 	// Header
 	blocked := m.aggregator.BlockedCount()
-	headerText := fmt.Sprintf("  OBSERVER  ·  %d sources  ·  %d items",
+	headerText := fmt.Sprintf("◉ OBSERVER  │  %d sources  │  %d items",
 		m.aggregator.SourceCount(),
 		m.aggregator.ItemCount())
 	if blocked > 0 {
-		headerText += fmt.Sprintf("  ·  %d ads blocked", blocked)
+		headerText += fmt.Sprintf("  │  %d blocked", blocked)
 	}
-	header := styles.Header.Width(m.width).Render(headerText)
-	sections = append(sections, header)
+	header := headerStyle.Render(headerText)
 
-	// Source refresh indicators (if enabled)
-	if m.showSources {
-		sections = append(sections, m.renderSourceBar())
-	}
-
-	// Stream content
-	sections = append(sections, m.stream.View())
+	// Stream
+	streamView := m.stream.View()
 
 	// Status bar
-	statusText := m.renderStatusBar()
-	status := styles.StatusBar.Width(m.width).Render(statusText)
-	sections = append(sections, status)
+	var statusText string
+	if m.lastError != nil {
+		statusText = errorStyle.Render("⚠ " + truncateError(m.lastError.Error(), m.width-10))
+	} else {
+		statusText = statusStyle.Render("↑↓ navigate  /commands  s shuffle  f filters  S sources  c config  r refresh  q quit")
+	}
 
-	return lipgloss.JoinVertical(lipgloss.Left, sections...)
+	// Compose with command palette overlay if active
+	content := lipgloss.JoinVertical(lipgloss.Left, header, streamView, statusText)
+
+	if m.cmdPalette.IsActive() {
+		// Overlay the command palette
+		paletteView := m.cmdPalette.View()
+		// Center horizontally, position near top
+		content = overlayCenter(content, paletteView, m.width, 3)
+	}
+
+	return content
 }
 
-func (m Model) renderSourceBar() string {
-	states := m.aggregator.GetSourceStates()
+func overlayCenter(base, overlay string, width, yOffset int) string {
+	baseLines := splitLines(base)
+	overlayLines := splitLines(overlay)
 
-	// Group by category and show refresh progress
-	var indicators []string
-	categories := make(map[string]int)
-
-	for _, s := range states {
-		categories[s.Config.Category]++
+	overlayWidth := 0
+	for _, line := range overlayLines {
+		if lipgloss.Width(line) > overlayWidth {
+			overlayWidth = lipgloss.Width(line)
+		}
 	}
 
-	// Show counts per category with mini progress
-	for cat, count := range categories {
-		indicator := fmt.Sprintf("%s:%d", cat, count)
-		indicators = append(indicators, indicator)
+	xOffset := (width - overlayWidth) / 2
+	if xOffset < 0 {
+		xOffset = 0
 	}
 
-	// Limit width
-	barContent := ""
-	for i, ind := range indicators {
+	// Overlay the lines
+	for i, overlayLine := range overlayLines {
+		targetLine := yOffset + i
+		if targetLine < len(baseLines) {
+			baseLines[targetLine] = insertAt(baseLines[targetLine], overlayLine, xOffset)
+		}
+	}
+
+	return joinLines(baseLines)
+}
+
+func splitLines(s string) []string {
+	var lines []string
+	current := ""
+	for _, r := range s {
+		if r == '\n' {
+			lines = append(lines, current)
+			current = ""
+		} else {
+			current += string(r)
+		}
+	}
+	if current != "" {
+		lines = append(lines, current)
+	}
+	return lines
+}
+
+func joinLines(lines []string) string {
+	result := ""
+	for i, line := range lines {
 		if i > 0 {
-			barContent += "  "
+			result += "\n"
 		}
-		barContent += ind
-		if len(barContent) > m.width-10 {
-			barContent += "..."
-			break
-		}
+		result += line
 	}
-
-	return styles.SourceBadge.Width(m.width).Render("  " + barContent)
+	return result
 }
 
-func (m Model) renderStatusBar() string {
-	if m.commandMode {
-		return fmt.Sprintf("  /%-20s  [esc] cancel", m.commandBuf)
+func insertAt(base, insert string, x int) string {
+	// Simple insertion - just replace characters
+	baseRunes := []rune(base)
+	insertRunes := []rune(insert)
+
+	// Pad base if needed
+	for len(baseRunes) < x+len(insertRunes) {
+		baseRunes = append(baseRunes, ' ')
 	}
-	if m.err != nil {
-		return "  Error: " + m.err.Error()
+
+	// Insert
+	for i, r := range insertRunes {
+		if x+i < len(baseRunes) {
+			baseRunes[x+i] = r
+		}
 	}
-	return "  [↑↓] navigate  [s] shuffle  [f] filters  [S] sources  [c] config  [r] refresh  [q] quit"
+
+	return string(baseRunes)
+}
+
+func truncateError(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen-3] + "..."
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 // Commands
@@ -490,7 +552,7 @@ func (m Model) refreshDueSources() tea.Cmd {
 
 	var cmds []tea.Cmd
 	for _, s := range due {
-		state := s // Capture
+		state := s
 		m.aggregator.MarkFetching(state.Config.Name, true)
 
 		cmds = append(cmds, func() tea.Msg {
@@ -498,6 +560,7 @@ func (m Model) refreshDueSources() tea.Cmd {
 			return ItemsLoadedMsg{
 				Items:      items,
 				SourceName: state.Config.Name,
+				Category:   state.Config.Category,
 				Err:        err,
 			}
 		})
@@ -519,6 +582,7 @@ func (m Model) refreshAllSources() tea.Cmd {
 			return ItemsLoadedMsg{
 				Items:      items,
 				SourceName: state.Config.Name,
+				Category:   state.Config.Category,
 				Err:        err,
 			}
 		})

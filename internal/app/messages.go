@@ -10,6 +10,7 @@ import (
 type ItemsLoadedMsg struct {
 	Items      []feeds.Item
 	SourceName string
+	Category   string
 	Err        error
 }
 

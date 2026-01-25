@@ -24,6 +24,7 @@ type Filter struct {
 func DefaultFilter() *Filter {
 	f := &Filter{
 		BlockKeywords: []string{
+			// Ads
 			"sponsored",
 			"advertisement",
 			"paid content",
@@ -36,6 +37,17 @@ func DefaultFilter() *Filter {
 			"underwritten by",
 			"[ad]",
 			"[sponsored]",
+			// Financial spam
+			"credit card",
+			"cash back card",
+			"0% apr",
+			"0% intro",
+			"home equity",
+			"balance transfer",
+			"best cash back",
+			"avoid credit card interest",
+			"charging 0% interest",
+			"cash out of your home",
 		},
 		SourceBlockPatterns: make(map[string][]*regexp.Regexp),
 	}
@@ -123,6 +135,12 @@ func compilePatterns(patterns []string) []*regexp.Regexp {
 
 // ShouldBlock returns true if the item should be filtered out
 func (f *Filter) ShouldBlock(item Item) bool {
+	// Block empty titles
+	title := strings.TrimSpace(item.Title)
+	if title == "" {
+		return true
+	}
+
 	// Check URL patterns
 	for _, re := range f.BlockURLPatterns {
 		if re.MatchString(item.URL) {
