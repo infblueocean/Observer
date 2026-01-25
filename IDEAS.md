@@ -107,11 +107,11 @@ Based on the research, here are our guiding principles:
 
 ### Concrete Improvements (Prioritized)
 
-#### Phase 1: Breathing Room (Quick Wins)
-- [ ] Time band dividers: "━━━ Past Hour ━━━" with muted styling
-- [ ] 1 blank line between time bands (proximity grouping)
-- [ ] Fresh indicator only for < 10 minutes (make it meaningful)
-- [ ] Better source abbreviations (not truncation)
+#### Phase 1: Breathing Room (Quick Wins) ✓ DONE
+- [x] Time band dividers: "─── Past Hour ───" with muted styling
+- [x] 1 blank line between time bands (proximity grouping)
+- [x] Fresh indicator only for < 10 minutes (make it meaningful)
+- [x] Better source abbreviations: HN, NYT, WaPo, WSJ, SCMP, SMH, r/ML, etc.
 
 #### Phase 2: Hierarchy & Expansion
 - [ ] Selected item shows 1-line summary below title
