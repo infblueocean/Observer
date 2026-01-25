@@ -235,12 +235,13 @@ func (m Model) renderItems() string {
 	// Calculate how many lines we can show
 	availableHeight := m.height - 2 // Leave room for scroll indicator
 
-	// Build all renderable lines with their item indices
-	type renderedLine struct {
-		content   string
+	// Build all renderable content with item indices
+	// Selected items may have multiple lines (title + summary)
+	type renderedBlock struct {
+		lines     []string
 		itemIndex int // -1 for dividers/spacing
 	}
-	var allLines []renderedLine
+	var allBlocks []renderedBlock
 
 	currentBand := timeBand(-1)
 	for i, item := range m.items {
@@ -250,24 +251,39 @@ func (m Model) renderItems() string {
 		if band != currentBand {
 			if currentBand != -1 {
 				// Blank line before new band (breathing room)
-				allLines = append(allLines, renderedLine{"", -1})
+				allBlocks = append(allBlocks, renderedBlock{[]string{""}, -1})
 			}
 			// Time band divider
 			divider := m.renderTimeBandDivider(band)
-			allLines = append(allLines, renderedLine{divider, -1})
+			allBlocks = append(allBlocks, renderedBlock{[]string{divider}, -1})
 			currentBand = band
 		}
 
 		// Render the item
 		selected := i == m.cursor
-		line := m.renderItem(item, selected)
-		allLines = append(allLines, renderedLine{line, i})
+		rendered := m.renderItem(item, selected)
+
+		// Split into lines (selected items may have multiple)
+		itemLines := strings.Split(rendered, "\n")
+		allBlocks = append(allBlocks, renderedBlock{itemLines, i})
 	}
 
-	// Find the line index where cursor item is
+	// Flatten blocks to lines with tracking
+	type lineInfo struct {
+		content   string
+		itemIndex int
+	}
+	var allLines []lineInfo
+	for _, block := range allBlocks {
+		for _, line := range block.lines {
+			allLines = append(allLines, lineInfo{line, block.itemIndex})
+		}
+	}
+
+	// Find the line index where cursor item starts
 	cursorLineIdx := 0
-	for i, rl := range allLines {
-		if rl.itemIndex == m.cursor {
+	for i, li := range allLines {
+		if li.itemIndex == m.cursor {
 			cursorLineIdx = i
 			break
 		}
@@ -336,7 +352,6 @@ func (m Model) renderItem(item feeds.Item, selected bool) string {
 	// Get category color
 	category := m.categories[item.ID]
 	if category == "" {
-		// Try to derive from source type or name
 		category = deriveCategoryFromSource(item.SourceName, string(item.Source))
 	}
 	catColor, ok := categoryColors[category]
@@ -348,21 +363,33 @@ func (m Model) renderItem(item feeds.Item, selected bool) string {
 	age := time.Since(item.Published)
 	timeStr := formatAge(age)
 
-	// Source name - use abbreviation if available, otherwise smart truncate
+	// Source name - use abbreviation if available
 	sourceName := getSourceAbbrev(item.SourceName)
 
+	// Determine if this is a "breaking" wire service item
+	isBreaking := isBreakingNews(item, category, age)
+
 	// Source badge with category color
+	badgeBg := catColor
+	badgeFg := lipgloss.Color("#0d1117")
+	if isBreaking {
+		// Breaking news gets pulsing red treatment
+		badgeBg = lipgloss.Color("#f85149")
+	}
 	sourceBadge := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("#0d1117")).
-		Background(catColor).
+		Foreground(badgeFg).
+		Background(badgeBg).
 		Padding(0, 1).
 		Render(sourceName)
 
-	// Time stamp - right side, muted
-	timeStyle := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("#484f58"))
+	// Time stamp style - dimmer for older items
+	timeColor := lipgloss.Color("#484f58")
+	if age > 24*time.Hour {
+		timeColor = lipgloss.Color("#30363d") // Extra dim for old items
+	}
+	timeStyle := lipgloss.NewStyle().Foreground(timeColor)
 
-	// Fresh indicator - only for < 10 minutes (make it meaningful)
+	// Fresh indicator - only for < 10 minutes
 	freshIndicator := ""
 	if age < 10*time.Minute {
 		freshIndicator = lipgloss.NewStyle().
@@ -371,14 +398,26 @@ func (m Model) renderItem(item feeds.Item, selected bool) string {
 			Render(" ●")
 	}
 
-	// Title
+	// Breaking indicator
+	breakingIndicator := ""
+	if isBreaking {
+		breakingIndicator = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#f85149")).
+			Bold(true).
+			Render(" ⚡")
+	}
+
+	// Title width calculation
 	badgeWidth := lipgloss.Width(sourceBadge)
 	timeWidth := len(timeStr) + 2
-	freshWidth := 0
+	indicatorWidth := 0
 	if freshIndicator != "" {
-		freshWidth = 3
+		indicatorWidth = 3
 	}
-	maxTitleWidth := m.width - badgeWidth - timeWidth - freshWidth - 8
+	if breakingIndicator != "" {
+		indicatorWidth = 3
+	}
+	maxTitleWidth := m.width - badgeWidth - timeWidth - indicatorWidth - 8
 	if maxTitleWidth < 20 {
 		maxTitleWidth = 20
 	}
@@ -386,40 +425,18 @@ func (m Model) renderItem(item feeds.Item, selected bool) string {
 
 	// Build the line based on state
 	if selected {
-		// Selected: highlighted background, accent border, brighter text
-		titleStyle := lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#ffffff")).
-			Bold(true)
+		return m.renderSelectedItem(item, sourceBadge, title, timeStr, freshIndicator, breakingIndicator, catColor, age)
+	}
 
-		// Container with left border in category color
-		line := fmt.Sprintf("%s  %s%s",
-			sourceBadge,
-			titleStyle.Render(title),
-			freshIndicator)
-
-		// Pad and add time on right
-		lineWidth := lipgloss.Width(line)
-		padding := m.width - lineWidth - len(timeStr) - 6
-		if padding < 1 {
-			padding = 1
-		}
-		line += strings.Repeat(" ", padding) + timeStyle.Render(timeStr)
-
-		containerStyle := lipgloss.NewStyle().
-			Background(lipgloss.Color("#1c2128")).
-			BorderLeft(true).
-			BorderStyle(lipgloss.ThickBorder()).
-			BorderForeground(catColor).
-			Width(m.width - 2)
-
-		return containerStyle.Render(line)
+	// Determine title color based on age
+	titleColor := lipgloss.Color("#c9d1d9")
+	if age > 24*time.Hour {
+		titleColor = lipgloss.Color("#8b949e") // Dimmed for old
 	}
 
 	if item.Read {
 		// Read: dimmed everything
-		titleStyle := lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#484f58"))
-
+		titleStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#484f58"))
 		dimBadge := lipgloss.NewStyle().
 			Foreground(lipgloss.Color("#484f58")).
 			Background(lipgloss.Color("#21262d")).
@@ -427,7 +444,6 @@ func (m Model) renderItem(item feeds.Item, selected bool) string {
 			Render(sourceName)
 
 		line := fmt.Sprintf("  %s  %s", dimBadge, titleStyle.Render(title))
-
 		lineWidth := lipgloss.Width(line)
 		padding := m.width - lineWidth - len(timeStr) - 4
 		if padding < 1 {
@@ -436,14 +452,14 @@ func (m Model) renderItem(item feeds.Item, selected bool) string {
 		return line + strings.Repeat(" ", padding) + timeStyle.Render(timeStr)
 	}
 
-	// Normal: clean, readable
-	titleStyle := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("#c9d1d9"))
+	// Normal item
+	indicator := freshIndicator
+	if breakingIndicator != "" {
+		indicator = breakingIndicator
+	}
 
-	line := fmt.Sprintf("  %s  %s%s",
-		sourceBadge,
-		titleStyle.Render(title),
-		freshIndicator)
+	titleStyle := lipgloss.NewStyle().Foreground(titleColor)
+	line := fmt.Sprintf("  %s  %s%s", sourceBadge, titleStyle.Render(title), indicator)
 
 	lineWidth := lipgloss.Width(line)
 	padding := m.width - lineWidth - len(timeStr) - 4
@@ -451,6 +467,163 @@ func (m Model) renderItem(item feeds.Item, selected bool) string {
 		padding = 1
 	}
 	return line + strings.Repeat(" ", padding) + timeStyle.Render(timeStr)
+}
+
+// renderSelectedItem renders an expanded selected item with summary
+func (m Model) renderSelectedItem(item feeds.Item, sourceBadge, title, timeStr, freshIndicator, breakingIndicator string, catColor lipgloss.Color, age time.Duration) string {
+	timeStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#484f58"))
+
+	// Title line - bright and bold
+	titleStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#ffffff")).
+		Bold(true)
+
+	indicator := freshIndicator
+	if breakingIndicator != "" {
+		indicator = breakingIndicator
+	}
+
+	titleLine := fmt.Sprintf("%s  %s%s", sourceBadge, titleStyle.Render(title), indicator)
+	titleLineWidth := lipgloss.Width(titleLine)
+	padding := m.width - titleLineWidth - len(timeStr) - 6
+	if padding < 1 {
+		padding = 1
+	}
+	titleLine += strings.Repeat(" ", padding) + timeStyle.Render(timeStr)
+
+	// Summary line - extract and display if available
+	summaryLine := ""
+	if item.Summary != "" {
+		// Clean and truncate summary
+		summary := cleanSummary(item.Summary)
+		maxSummaryWidth := m.width - 12
+		if len(summary) > maxSummaryWidth {
+			summary = summary[:maxSummaryWidth-2] + ".."
+		}
+		if summary != "" {
+			summaryStyle := lipgloss.NewStyle().
+				Foreground(lipgloss.Color("#8b949e")).
+				Italic(true)
+			summaryLine = "     " + summaryStyle.Render(summary)
+		}
+	}
+
+	// URL hint
+	urlHint := ""
+	if item.URL != "" {
+		domain := extractDomain(item.URL)
+		if domain != "" {
+			urlStyle := lipgloss.NewStyle().
+				Foreground(lipgloss.Color("#58a6ff")).
+				Underline(true)
+			urlHint = "     " + urlStyle.Render(domain)
+		}
+	}
+
+	// Combine lines
+	var content string
+	if summaryLine != "" {
+		content = titleLine + "\n" + summaryLine
+	} else if urlHint != "" {
+		content = titleLine + "\n" + urlHint
+	} else {
+		content = titleLine
+	}
+
+	// Container with category-colored left border
+	containerStyle := lipgloss.NewStyle().
+		Background(lipgloss.Color("#1c2128")).
+		BorderLeft(true).
+		BorderStyle(lipgloss.ThickBorder()).
+		BorderForeground(catColor).
+		Width(m.width - 2)
+
+	return containerStyle.Render(content)
+}
+
+// isBreakingNews determines if an item should get "breaking" treatment
+func isBreakingNews(item feeds.Item, category string, age time.Duration) bool {
+	// Only recent items can be "breaking"
+	if age > 30*time.Minute {
+		return false
+	}
+
+	// Wire services get breaking treatment
+	if category == "wire" {
+		return true
+	}
+
+	// Check for breaking keywords in title
+	titleLower := strings.ToLower(item.Title)
+	breakingKeywords := []string{"breaking", "just in", "urgent", "alert", "developing"}
+	for _, kw := range breakingKeywords {
+		if strings.Contains(titleLower, kw) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// cleanSummary removes HTML and cleans up summary text
+func cleanSummary(s string) string {
+	// Remove HTML tags (simple approach)
+	result := s
+	for {
+		start := strings.Index(result, "<")
+		if start == -1 {
+			break
+		}
+		end := strings.Index(result[start:], ">")
+		if end == -1 {
+			break
+		}
+		result = result[:start] + result[start+end+1:]
+	}
+
+	// Decode common HTML entities
+	result = strings.ReplaceAll(result, "&#39;", "'")
+	result = strings.ReplaceAll(result, "&#34;", "\"")
+	result = strings.ReplaceAll(result, "&quot;", "\"")
+	result = strings.ReplaceAll(result, "&apos;", "'")
+	result = strings.ReplaceAll(result, "&amp;", "&")
+	result = strings.ReplaceAll(result, "&lt;", "<")
+	result = strings.ReplaceAll(result, "&gt;", ">")
+	result = strings.ReplaceAll(result, "&nbsp;", " ")
+	result = strings.ReplaceAll(result, "&#x27;", "'")
+	result = strings.ReplaceAll(result, "&#x22;", "\"")
+	result = strings.ReplaceAll(result, "&mdash;", "-")
+	result = strings.ReplaceAll(result, "&ndash;", "-")
+	result = strings.ReplaceAll(result, "&hellip;", "...")
+	result = strings.ReplaceAll(result, "&ldquo;", "\"")
+	result = strings.ReplaceAll(result, "&rdquo;", "\"")
+	result = strings.ReplaceAll(result, "&lsquo;", "'")
+	result = strings.ReplaceAll(result, "&rsquo;", "'")
+
+	// Remove extra whitespace
+	result = strings.Join(strings.Fields(result), " ")
+
+	// Remove common RSS cruft
+	result = strings.TrimPrefix(result, "Comments")
+	result = strings.TrimSpace(result)
+
+	return result
+}
+
+// extractDomain pulls the domain from a URL
+func extractDomain(url string) string {
+	// Remove protocol
+	domain := url
+	if idx := strings.Index(domain, "://"); idx != -1 {
+		domain = domain[idx+3:]
+	}
+	// Remove path
+	if idx := strings.Index(domain, "/"); idx != -1 {
+		domain = domain[:idx]
+	}
+	// Remove www.
+	domain = strings.TrimPrefix(domain, "www.")
+	return domain
 }
 
 func getSourceAbbrev(name string) string {
