@@ -37,17 +37,47 @@ func DefaultFilter() *Filter {
 			"underwritten by",
 			"[ad]",
 			"[sponsored]",
-			// Financial spam
+			// Financial spam - credit cards
 			"credit card",
 			"cash back card",
+			"cash back bonus",
+			"best card",
+			"right card",
 			"0% apr",
 			"0% intro",
-			"home equity",
+			"0% interest",
+			"no interest",
 			"balance transfer",
+			"intro apr",
+			"introductory rate",
+			// Financial spam - home/mortgage
+			"home equity",
+			"cash out of your home",
+			"mortgage rate",
+			"refinance",
+			"home loan",
+			"equity loan",
+			// Financial spam - general
 			"best cash back",
+			"save hundreds",
+			"save on interest",
+			"avoid interest",
 			"avoid credit card interest",
 			"charging 0% interest",
-			"cash out of your home",
+			"limited time offer",
+			"act now",
+			"don't miss out",
+			// Shopping/deals spam
+			"holiday gift",
+			"gift buying",
+			"best deals",
+			"price drop",
+			"flash sale",
+			"clearance",
+			"doorbuster",
+			"black friday",
+			"cyber monday",
+			"prime day",
 		},
 		SourceBlockPatterns: make(map[string][]*regexp.Regexp),
 	}
@@ -70,6 +100,7 @@ func DefaultFilter() *Filter {
 
 	// Title patterns that indicate ads/promos
 	f.BlockTitlePatterns = compilePatterns([]string{
+		// Explicit ad markers
 		`(?i)^sponsored:`,
 		`(?i)^ad:`,
 		`(?i)\[sponsored\]`,
@@ -77,6 +108,25 @@ func DefaultFilter() *Filter {
 		`(?i)paid post:`,
 		`(?i)partner content:`,
 		`(?i)^promo:`,
+		// Financial spam patterns
+		`(?i)\$\d+.*cash\s*back`,           // "$200 Cash Back"
+		`(?i)cash\s*back.*\$\d+`,           // "Cash Back $200"
+		`(?i)save.*\$\d+`,                  // "Save $500"
+		`(?i)\d+%.*interest`,               // "0% interest", "15% interest"
+		`(?i)interest.*\d+%`,               // "interest until 2024"
+		`(?i)best.*card.*for`,              // "Best card for..."
+		`(?i)card.*of\s*(the\s*)?\d{4}`,    // "card of 2024"
+		`(?i)top\s*\d+.*cards?`,            // "Top 10 cards"
+		`(?i)cards?\s*charging`,            // "Cards Charging 0%"
+		`(?i)(get|earn).*bonus`,            // "Get a bonus", "Earn bonus"
+		`(?i)limited.time`,                 // "Limited time"
+		`(?i)act\s*now`,                    // "Act now"
+		`(?i)don'?t\s*miss`,                // "Don't miss"
+		// Shopping patterns
+		`(?i)best\s*(deal|price|buy)s?`,    // "Best deals"
+		`(?i)(record.?low|lowest)\s*price`, // "Record-low price"
+		`(?i)save.*on.*purchase`,           // "Save on purchase"
+		`(?i)\d+%\s*off`,                   // "50% off"
 	})
 
 	// CNN-specific patterns
