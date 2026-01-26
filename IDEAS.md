@@ -119,15 +119,16 @@ Based on the research, here are our guiding principles:
 - [x] "Breaking" visual treatment: ⚡ indicator + red badge for wire < 30min
 - [x] Subtle dimming for items > 24 hours old (title + timestamp)
 
-#### Phase 3: Sparklines & Trends
-- [ ] Prediction market: tiny probability sparkline
-- [ ] Entity timeline: "▁▂▃▅▇ 47 mentions" inline
-- [ ] Source activity: heartbeat indicator for active sources
+#### Phase 3: Sparklines & Trends ✓ DONE
+- [x] Prediction market: probability bar visualization (extracted from title/summary)
+- [x] Source activity: heartbeat indicator (▁▂▃▅▇) for sources with 3+ items in last hour
+- [ ] Entity timeline: "▁▂▃▅▇ 47 mentions" inline (requires correlation engine)
 
-#### Phase 4: Adaptive Density
-- [ ] "Compact" vs "Comfortable" view toggle
-- [ ] Auto-adjust based on terminal height
-- [ ] Collapse read items to single line
+#### Phase 4: Adaptive Density ✓ DONE
+- [x] "Compact" vs "Comfortable" view toggle (`v` key)
+- [x] Auto-adjust: terminals < 30 lines auto-switch to compact
+- [x] Compact mode: read items collapsed to minimal "· title" format
+- [x] Density indicator in status bar: ◉ comfortable, ◎ compact
 
 ---
 
@@ -234,6 +235,92 @@ When you select an item, the "brain trust" analyzes it:
 3. Responses stream into brain trust panel
 4. User can expand any perspective
 5. Deep-dive: full chat with that persona's angle
+
+## Collaboration Philosophy (Design Decision)
+
+### The Problem with Naive Collaboration
+"I add a friend, suddenly my feed is 50% rock climbing. WTF?"
+
+Traditional sharing = firehose of noise. This violates our core ethos:
+- "You own your attention" → Now someone else owns it
+- "Curation by consent" → You didn't ask for rock climbing
+- "Calm is a feature" → Now you're overwhelmed
+
+### The Thoughtful Collaboration Model
+
+**Core Insight:** Collaboration should increase CLARITY, not VOLUME.
+
+What's valuable about a collaborator isn't their sources - it's their JUDGMENT.
+- What do they think is important?
+- What patterns do they see?
+- What should I not miss?
+
+**Principle: Collaborator Sources Start Quiet**
+```
+When Alice adds Bob as collaborator:
+├── Bob's sources → Alice's "Auto" mode (not in stream)
+├── Bob's filters → Available but not active
+├── Bob's bookmarks → Visible in "Collaborator Picks" section
+└── Bob's "Live" sources → Suggested for promotion
+```
+
+Alice's feed doesn't change overnight. She can CHOOSE to:
+1. See what Bob bookmarked (his judgment)
+2. Promote Bob's sources she finds valuable
+3. Adopt Bob's filters
+4. Ignore Bob's rock climbing obsession
+
+**Principle: Signal Amplification > Source Addition**
+```
+┌─────────────────────────────────────────────────────────────┐
+│ 🔥 3 collaborators flagged this                            │
+│ Reuters: Major breakthrough in fusion energy                │
+│                                                             │
+│ 👀 Alice bookmarked · Bob reading now · Carol shared        │
+└─────────────────────────────────────────────────────────────┘
+```
+
+When multiple collaborators signal something matters, it surfaces.
+This is CLARITY - the group helps you see what's important.
+
+**Principle: Trust is Earned, Not Assumed**
+
+| Trust Level | What You See |
+|-------------|--------------|
+| New collaborator | Their bookmarks only |
+| Trusted | Their bookmarks + their "hot" items |
+| Inner circle | Their full Live sources available |
+
+Trust grows through: time, overlap in interests, helpful signals.
+
+**Principle: Asymmetric Collaboration**
+- I can follow Alice's curation without her following mine
+- I can adopt Bob's "security" sources but not his "sports"
+- Collaboration is granular, not all-or-nothing
+
+### Collaboration = Collective Intelligence
+
+The goal isn't "more data" - it's "smarter curation":
+
+| Anti-Pattern | Pattern |
+|--------------|---------|
+| Firehose their sources | Surface their judgment |
+| Add 500 items | Highlight 5 important ones |
+| Duplicate effort | Divide attention efficiently |
+| Echo chamber | Diverse perspectives, unified signal |
+
+**The Dream State:**
+```
+"My 4 collaborators and I collectively monitor 500 sources.
+ Each of us sees ~50 items/day (our Live sources).
+ But when something BIG happens, we all see it instantly
+ because someone in the group flagged it."
+```
+
+This is Observer's collaboration value proposition:
+**Together we see more clearly, not just more.**
+
+---
 
 ### Shared Sessions
 Token-based collaborative viewing:
@@ -630,8 +717,29 @@ This means Off mode doesn't delete old items - it just stops fetching new ones a
 - [x] SEC EDGAR (Latest, 8-K, 10-K filings - public atom feeds)
 - [x] Techmeme + Memeorandum + AllSides aggregators
 - [x] Google News RSS (topics)
+- [x] X/Twitter content via aggregators (see below)
 - [ ] Mastodon public timeline (via Open RSS or native)
 - [ ] Wikipedia EventStreams (real-time edits - public)
+
+### X/Twitter Content (Via Aggregators)
+
+Since X's API is paywalled ($100+/mo) and requires auth, we surface X content through sites that cover trending tweets and viral content:
+
+| Source | RSS URL | Content |
+|--------|---------|---------|
+| **Daily Dot** | dailydot.com/feed/ | Internet culture, viral tweets |
+| **Daily Dot Viral** | dailydot.com/tags/viral/feed/ | Specifically viral content |
+| **Daily Dot Social** | dailydot.com/tags/social-media/feed/ | Social media coverage |
+| **BuzzFeed Internet** | buzzfeed.com/bestoftheinternet.xml | "Best of the Internet" - viral tweets, memes |
+| **Know Your Meme** | knowyourmeme.com/newsfeed.rss | Meme documentation, trending memes |
+| **Mashable** | mashable.com/feeds/rss/all | Tech & culture with social media coverage |
+| **Input Mag** | inputmag.com/rss | Tech culture and social trends |
+
+**Why This Works:**
+- These sites employ journalists who monitor X/Twitter trends
+- They write about viral tweets, embed them, provide context
+- We get the signal without the API cost or tracking
+- Aggregators like Daily Dot are "hometown newspapers of the web"
 
 ### Medium Priority
 - [ ] Kalshi prediction markets (CFTC-regulated)

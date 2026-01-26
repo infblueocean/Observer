@@ -182,9 +182,11 @@ func (m Model) updateList(msg tea.Msg) (Model, tea.Cmd) {
 			}
 
 			if item, ok := m.list.SelectedItem().(FilterItem); ok {
-				// Toggle filter
+				// Toggle filter, preserving cursor position
+				idx := m.list.Index()
 				m.engine.ToggleFilter(item.filter.ID)
 				m.refreshList()
+				m.list.Select(idx)
 			}
 			return m, nil
 		}

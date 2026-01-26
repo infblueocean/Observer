@@ -3,9 +3,11 @@ package rss
 import (
 	"crypto/sha256"
 	"fmt"
+	"net/http"
 	"time"
 
 	"github.com/abelbrown/observer/internal/feeds"
+	"github.com/abelbrown/observer/internal/logging"
 	"github.com/mmcdole/gofeed"
 )
 
@@ -14,6 +16,7 @@ type Source struct {
 	name   string
 	url    string
 	parser *gofeed.Parser
+	client *http.Client
 }
 
 // New creates a new RSS source
@@ -22,6 +25,9 @@ func New(name, url string) *Source {
 		name:   name,
 		url:    url,
 		parser: gofeed.NewParser(),
+		client: &http.Client{
+			Timeout: 30 * time.Second,
+		},
 	}
 }
 
@@ -34,9 +40,23 @@ func (s *Source) Type() feeds.SourceType {
 }
 
 func (s *Source) Fetch() ([]feeds.Item, error) {
-	feed, err := s.parser.ParseURL(s.url)
+	// Use custom HTTP client to get status code for logging
+	resp, err := s.client.Get(s.url)
 	if err != nil {
-		return nil, fmt.Errorf("failed to fetch %s: %w", s.url, err)
+		logging.Error("RSS fetch network error", "source", s.name, "url", s.url, "error", err)
+		return nil, fmt.Errorf("network error fetching %s: %w", s.name, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		logging.Error("RSS fetch HTTP error", "source", s.name, "url", s.url, "status", resp.StatusCode)
+		return nil, fmt.Errorf("HTTP %d fetching %s", resp.StatusCode, s.name)
+	}
+
+	feed, err := s.parser.Parse(resp.Body)
+	if err != nil {
+		logging.Error("RSS parse error", "source", s.name, "url", s.url, "error", err)
+		return nil, fmt.Errorf("failed to parse %s: %w", s.name, err)
 	}
 
 	items := make([]feeds.Item, 0, len(feed.Items))

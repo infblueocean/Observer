@@ -2,6 +2,7 @@ package curation
 
 import (
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -272,16 +273,23 @@ func (fe *FilterEngine) ToggleFilter(id string) bool {
 	return false
 }
 
-// GetFilters returns all filters
+// GetFilters returns all filters in consistent order
 func (fe *FilterEngine) GetFilters() []*Filter {
 	result := make([]*Filter, 0, len(fe.filters))
 	for _, f := range fe.filters {
 		result = append(result, f)
 	}
+	// Sort by creation time, then by name for stable ordering
+	sort.Slice(result, func(i, j int) bool {
+		if result[i].CreatedAt.Equal(result[j].CreatedAt) {
+			return result[i].Name < result[j].Name
+		}
+		return result[i].CreatedAt.Before(result[j].CreatedAt)
+	})
 	return result
 }
 
-// GetEnabledFilters returns only enabled filters
+// GetEnabledFilters returns only enabled filters in consistent order
 func (fe *FilterEngine) GetEnabledFilters() []*Filter {
 	var result []*Filter
 	for _, f := range fe.filters {
@@ -289,6 +297,12 @@ func (fe *FilterEngine) GetEnabledFilters() []*Filter {
 			result = append(result, f)
 		}
 	}
+	sort.Slice(result, func(i, j int) bool {
+		if result[i].CreatedAt.Equal(result[j].CreatedAt) {
+			return result[i].Name < result[j].Name
+		}
+		return result[i].CreatedAt.Before(result[j].CreatedAt)
+	})
 	return result
 }
 

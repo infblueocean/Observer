@@ -37,6 +37,25 @@ func DefaultFilter() *Filter {
 			"underwritten by",
 			"[ad]",
 			"[sponsored]",
+			// Conferences/Events/Webinars promo
+			"secure your spot",
+			"reserve your spot",
+			"save your spot",
+			"register now",
+			"register today",
+			"sign up now",
+			"sign up today",
+			"join us at",
+			"join us for",
+			"webinar:",
+			"free webinar",
+			"live webinar",
+			"upcoming webinar",
+			"virtual event",
+			"virtual summit",
+			"conference registration",
+			"early bird",
+			"early-bird",
 			// Financial spam - credit cards
 			"credit card",
 			"cash back card",
@@ -96,6 +115,12 @@ func DefaultFilter() *Filter {
 		`/promo/`,
 		`utm_source=paid`,
 		`/underwriter/`,
+		// Network-specific ad sections (block globally, not just per-source)
+		`/cnn-underscored/`,
+		`/select/shopping`,
+		`nbcnews\.com/select`,
+		`/reviewed/`,
+		`/advisor/`,
 	})
 
 	// Title patterns that indicate ads/promos
@@ -127,6 +152,17 @@ func DefaultFilter() *Filter {
 		`(?i)(record.?low|lowest)\s*price`, // "Record-low price"
 		`(?i)save.*on.*purchase`,           // "Save on purchase"
 		`(?i)\d+%\s*off`,                   // "50% off"
+		// Conference/Event/Webinar promo patterns
+		`(?i)secure your (spot|seat)`,      // "Secure Your Spot at..."
+		`(?i)reserve your (spot|seat)`,     // "Reserve Your Spot"
+		`(?i)register (now|today|here)`,    // "Register Now"
+		`(?i)sign up (now|today|here)`,     // "Sign Up Now"
+		`(?i)join us (at|for)`,             // "Join Us At RSA"
+		`(?i)^webinar:`,                    // "Webinar: ..."
+		`(?i)free (webinar|workshop|training)`, // "Free Webinar"
+		`(?i)upcoming (event|webinar|conference)`, // "Upcoming Event"
+		`(?i)early.?bird`,                  // "Early Bird Registration"
+		`(?i)call for (papers|speakers|proposals)`, // CFP announcements
 	})
 
 	// CNN-specific patterns

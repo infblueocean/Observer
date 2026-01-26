@@ -3,6 +3,8 @@ package feeds
 import (
 	"sync"
 	"time"
+
+	"github.com/abelbrown/observer/internal/logging"
 )
 
 // SourceState tracks the state of a single source
@@ -158,7 +160,13 @@ func (a *Aggregator) UpdateSourceState(name string, itemCount int, err error) {
 
 	if err != nil {
 		s.ConsecErrors++
+		if s.ConsecErrors >= 3 {
+			logging.Warn("Source experiencing repeated failures", "source", name, "consecutive_errors", s.ConsecErrors, "error", err)
+		}
 	} else {
+		if s.ConsecErrors > 0 {
+			logging.Info("Source recovered", "source", name, "previous_errors", s.ConsecErrors)
+		}
 		s.ConsecErrors = 0
 	}
 

@@ -91,6 +91,24 @@ Sources (RSS, HN API, USGS)
    Stream View (Bubble Tea)
 ```
 
+### Database Schema
+
+SQLite database at `~/.observer/observer.db`:
+
+```sql
+-- Feed items
+items (id, source_type, source_name, title, summary, url, published_at, read, saved, hidden)
+
+-- Source tracking
+sources (name, last_fetched_at, item_count, error_count, last_error)
+
+-- AI analyses
+analyses (id, item_id, provider, model, prompt, raw_response, content, error, created_at)
+
+-- Top stories cache (NEW)
+top_stories_cache (item_id, title, label, reason, zinger, first_seen, last_seen, hit_count, miss_count)
+```
+
 ---
 
 ## Key Decisions
@@ -122,6 +140,22 @@ This reduces unnecessary API calls while keeping important sources fresh.
 - Good for: clickbait detection, opinion tagging
 - Run periodically in background
 
+**Built-in Filter Categories:**
+
+The default filter blocks common promotional content:
+
+| Category | Examples |
+|----------|----------|
+| Ads | "sponsored", "paid content", "partner content" |
+| Financial spam | Credit cards, mortgages, "0% APR" |
+| Shopping | "best deals", "flash sale", "% off" |
+| Conference promo | "secure your spot", "register now", "webinar:" |
+| Event spam | "join us at", "early bird", "call for papers" |
+
+**Design Principle:** Filter promotional content while preserving news ABOUT those topics.
+- ❌ Blocks: "Secure Your Spot at RSAC 2026 Conference" (promo)
+- ✅ Allows: "RSA Conference Announces New Security Research" (news)
+
 ### 3. Source Weights
 
 Each source has a weight (default 1.0):
@@ -149,6 +183,177 @@ Token-based sharing:
 - `obs_tmp_xxx` - 24h expiry
 
 Filters can be shared within sessions.
+
+### 6. Visual Hierarchy (Phases 1-4)
+
+Based on research (Tufte, Gestalt, Information Scent theory), the stream view uses:
+
+**Time Bands**: Items grouped by recency (Just Now, Past Hour, Earlier Today, Yesterday, Older)
+- Whitespace between groups, not borders (Gestalt proximity principle)
+- Dividers are muted, unobtrusive
+
+**Source Abbreviations**: Recognizable short names (HN, NYT, WaPo, r/ML)
+- Better than truncation for scannability
+
+**Breaking News Treatment**: ⚡ indicator + red badge for wire services < 30 min
+- Keywords like "BREAKING", "URGENT" also trigger this
+
+**Age-Based Dimming**: Items > 24 hours get muted styling
+- Helps focus on fresh content
+
+### 7. Adaptive Density (Phase 4)
+
+Two view modes:
+- **Comfortable** (default): Expanded selection with summary, time band dividers, breathing room
+- **Compact**: Single line per item, minimal chrome, collapsed read items
+
+Auto-adjusts to compact mode on small terminals (< 30 lines).
+
+Toggle with `v` key or `/density` command.
+
+Status bar shows current mode: ◉ comfortable, ◎ compact
+
+### 8. Source Activity Tracking (Phase 3)
+
+Each source tracks recent activity:
+- Count of items in last hour
+- Most recent item timestamp
+
+Displayed as heartbeat indicator for active sources (▁▂▃▅▆▇).
+Only shows if source has 3+ items in last hour (avoids noise).
+
+### 9. Prediction Market Sparklines (Phase 3)
+
+For prediction market items (Polymarket, Manifold):
+- Extracts probability from title/summary (looks for `NN%` pattern)
+- Displays as probability bar: `████████████░░░░░░░░ 67%`
+
+Provides at-a-glance market sentiment without clicking through.
+
+### 10. AI Analysis (Brain Trust)
+
+AI-powered news analysis with multiple providers:
+
+**Providers:**
+- Ollama (local, fast) - auto-detects available model
+- Claude (cloud, quality) - requires API key
+
+**Two-Phase Analysis:**
+1. Local model provides quick interim analysis
+2. Cloud model replaces with higher quality (if available)
+
+**Top Stories:**
+- Press `T` or auto-triggers after feeds load
+- Auto-refreshes every 30 seconds
+- Progress bar shows countdown: `[━━━━━━╌╌╌╌ 15s]`
+- Color gradient: green (fresh) → yellow → red (stale)
+- Triggers 5s early for smooth transition
+
+**Breathing Top Stories (Dynamic Section):**
+
+The top stories section expands and contracts based on what's actually happening.
+Instead of always showing exactly 3, it shows 2-8 stories based on the news cycle.
+
+**Story Lifecycle:**
+- 🔴 **BREAKING**: New, first 1-2 identifications, urgent
+- 🟡 **DEVELOPING**: Hit count 2-3, gaining traction
+- 🔥 **MAJOR** / 🟠 **ONGOING**: Hit count 4+, persistent major story
+- ⚪ **FADING**: Not identified recently, cooling off (dimmed)
+
+**Smart Merging:**
+- Current LLM results merged with high-confidence cached stories
+- Stories with hit count >= 3 persist even if LLM misses them once
+- Fading stories auto-removed after 3 consecutive misses
+
+**Display:**
+- `[LABEL] Title · Source 🔥×5` - Fire + count for high-confidence stories
+- Fading stories are dimmed, no reason line shown
+- Duration shown for ongoing stories: `(top for 2h)`
+
+**Breathing Behavior:**
+- Slow news day: 2-3 stories
+- Active news day: 5-6 stories
+- Major breaking event: Can expand to 8
+
+LLM now asked for "all important stories (3-6)" instead of exactly 3.
+
+**Analysis Panel:**
+- Shows AI analysis of selected item
+- Scrollable content (mouse wheel or indicators)
+- Max 33% screen height, capped at 12 lines
+- Shows provider name and loading stages
+- **Connections section**: When analyzing an item, shows how it connects to current top stories
+
+**Zingers (Local LLM One-Liners):**
+
+After top stories are identified, the local LLM generates punchy one-line summaries:
+- Generated asynchronously in background (doesn't block UI)
+- Cached and persisted across sessions
+- Displayed in blue, more prominent than generic reasons
+- Max 15 words, focuses on "why this matters"
+
+Example zingers:
+- "Fed rate cut signals recession fears despite strong jobs data"
+- "Tesla's robotaxi delay threatens $500B valuation premise"
+- "Ukraine's drone strike hits Russian oil refinery 500 miles from front"
+
+**Top Stories Cache Persistence:**
+
+The top stories cache is persisted to SQLite, so the app "picks up where it left off":
+- Saved on quit (`q` or `ctrl+c`)
+- Loaded on startup
+- Auto-prunes entries older than 48 hours
+- Only loads entries from last 24 hours
+
+What's persisted:
+- ItemID, Title, Label, Reason, Zinger
+- FirstSeen, LastSeen timestamps
+- HitCount, MissCount
+
+Benefits:
+- Zingers don't need regeneration
+- Hit counts preserved across sessions
+- "Persistent" stories stay persistent
+- Quick startup with pre-populated context
+
+**MVC Pattern (Controller Orchestrates Data Flow):**
+
+The analysis feature follows proper MVC:
+```
+Controller (app.go):
+  1. Gets top stories context from brain trust
+  2. Passes it to AnalyzeWithContext()
+  3. Model doesn't reach into itself for context
+```
+
+This keeps the code testable and decoupled.
+
+**Config Options (`~/.observer/config.json`):**
+```json
+{
+  "brain_trust": {
+    "enabled": true,
+    "auto_analyze": false,
+    "dwell_time_ms": 1000,
+    "prefer_local": true,
+    "local_for_quick_ops": true
+  }
+}
+```
+
+### 11. Smooth Scrolling (Harmonica)
+
+Spring-based physics for smooth cursor movement:
+- Frequency: 6.0 (fast response)
+- Damping: 0.8 (minimal bounce)
+- Updates on each frame tick
+
+### 12. Error Log Pane
+
+Transient error display:
+- Shows last 2 errors above command bar
+- Fades after 10 seconds of no new errors
+- All errors logged to `~/.observer/logs/observer-YYYY-MM-DD.log`
 
 ---
 
@@ -186,8 +391,13 @@ Keys are auto-populated from:
 |-----|--------|
 | `↑↓` / `jk` | Navigate |
 | `enter` | Mark read |
+| `a` | AI analysis of selected item |
+| `T` | Analyze top stories (auto-refreshes every 30s) |
+| `tab` | Toggle AI analysis panel |
 | `s` | Shuffle items |
+| `v` | Toggle density (compact/comfortable) |
 | `f` | Open filter manager |
+| `S` | Open source manager |
 | `c` | Open config |
 | `r` | Refresh due sources |
 | `R` | Force refresh all |
@@ -195,44 +405,115 @@ Keys are auto-populated from:
 | `/` | Command mode |
 | `q` | Quit |
 
+### Mouse Support
+
+| Action | Result |
+|--------|--------|
+| Scroll wheel over feed | Navigate up/down (3 items at a time) |
+| Scroll wheel over AI panel | Scroll analysis content |
+
 ### Commands
 
 | Command | Action |
 |---------|--------|
+| `/help` | Show help |
 | `/shuffle` | Randomize order |
 | `/refresh` | Force refresh |
-| `/filter` | Open filter manager |
+| `/density` | Toggle compact/comfortable view |
+| `/filters` | Open filter manager |
+| `/sources` | Open source manager |
 | `/config` | Open settings |
-| `/sources` | Toggle source panel |
+| `/panel` | Toggle source panel |
+| `/clearcache` | Clear top stories cache (if data gets corrupted) |
 
 ---
 
 ## Future Work
 
-### Phase 2: Multi-Source + Persistence (mostly done)
+### Beautiful Living Feed (DONE)
+- [x] Phase 1: Time bands, breathing room, source abbreviations
+- [x] Phase 2: Selected item expansion, breaking news, age dimming
+- [x] Phase 3: Prediction market sparklines, source activity indicators
+- [x] Phase 4: Compact/Comfortable density toggle, auto-adjust on small terminals
+- [ ] Entity timelines (requires correlation engine)
+
+### Multi-Source + Persistence (mostly done)
 - [x] Feed aggregator with per-source intervals
 - [x] SQLite persistence
-- [ ] Reddit API
+- [x] Reddit (via public .rss feeds)
+- [x] Prediction markets (Polymarket, Manifold)
+- [x] Top stories cache persistence (survives restarts)
 - [ ] Mastodon/Bluesky
 
-### Phase 3: Brain Trust
-- [ ] AI provider interface
-- [ ] Ollama + Claude integration
+### Brain Trust / AI Analysis (DONE)
+- [x] AI provider interface (Provider, Request, Response)
+- [x] Ollama integration (local LLM, auto-detects model)
+- [x] Claude integration (cloud API)
+- [x] Two-phase analysis: fast local → quality cloud
+- [x] AI Analysis panel UI with scroll support
+- [x] Top Stories auto-analysis (30s refresh with progress bar)
+- [x] Mouse scroll over analysis panel
+- [x] Breathing top stories (dynamic 2-8 based on news cycle)
+- [x] Zingers: local LLM punchy one-liners for top stories
+- [x] Analysis includes "Connections" section linking to top stories
+- [x] Reason validation (rejects garbage LLM output)
 - [ ] Persona system (Historian, Skeptic, Optimist, Connector)
-- [ ] Brain trust panel UI
-- [ ] Background analysis on item selection
 
-### Phase 4: Shared Sessions
+### Correlation Engine (NEW - See CORRELATION_ENGINE.md)
+*"Don't curate. Illuminate."*
+
+The correlation engine makes the shape of information visible without deciding what matters.
+Full design document: `CORRELATION_ENGINE.md`
+
+**Phase 0: Foundation (No LLM)**
+- [ ] Duplicate detection (simhash on titles)
+- [ ] Ticker extraction via regex ($AAPL, $TSLA)
+- [ ] Country extraction via dictionary
+- [ ] Basic "×3" indicator for duplicates
+
+**Phase 1: Entity Index**
+- [ ] LLM extraction pipeline (background worker)
+- [ ] Entity normalization/deduplication
+- [ ] Entity hover cards
+- [ ] Entity pages (all mentions of X)
+
+**Phase 2: Story Clusters**
+- [ ] Clustering algorithm (entity overlap + similarity)
+- [ ] "◐ 5 sources" indicator
+- [ ] Inline cluster expansion
+- [ ] Cluster velocity tracking
+
+**Phase 3: Disagreement Detection**
+- [ ] Claim extraction from text
+- [ ] Conflict detection between sources
+- [ ] ⚡ indicator for disagreements
+- [ ] Side-by-side comparison view
+
+**Phase 4: The Radar**
+- [ ] Velocity tracking (what's spiking)
+- [ ] Geographic distribution
+- [ ] Ambient awareness panel (Ctrl+R)
+- [ ] Click-to-filter from radar
+
+**Phase 5: Advanced**
+- [ ] "Catch Me Up" briefing flow
+- [ ] Prediction tracking (log claims, check outcomes)
+- [ ] Living graph visualization
+- [ ] Collaborative entity annotation (shared sessions)
+
+### Shared Sessions
 - [ ] Token generation & validation
 - [ ] S3/R2 sync layer
 - [ ] Shared filters & bookmarks
 - [ ] Presence indicators
 - [ ] WebSocket for real-time
+- [ ] Correlation data sharing between users
 
-### Phase 5: Polish
-- [ ] Animations (Harmonica)
+### Polish (Partial)
+- [x] Harmonica smooth scrolling (spring physics)
+- [x] Mouse support (scroll wheel)
+- [x] Error log pane (fades after 10s)
 - [ ] MCP server integration
-- [ ] Better error handling
 - [ ] Rate limiting
 
 ---

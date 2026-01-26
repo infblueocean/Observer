@@ -17,6 +17,9 @@ type Config struct {
 	// UI Preferences
 	UI UIConfig `json:"ui"`
 
+	// AI Analysis settings
+	Analysis AnalysisConfig `json:"brain_trust"` // JSON key kept for backwards compatibility
+
 	// Filters are stored separately but referenced here
 	FiltersFile string `json:"filters_file"`
 }
@@ -53,6 +56,16 @@ type UIConfig struct {
 	Theme           string `json:"theme"`
 	ShowSourcePanel bool   `json:"show_source_panel"`
 	ItemLimit       int    `json:"item_limit"`
+	DensityMode     string `json:"density_mode"` // "comfortable" or "compact"
+}
+
+// AnalysisConfig holds AI analysis preferences
+type AnalysisConfig struct {
+	Enabled          bool   `json:"enabled"`
+	AutoAnalyze      bool   `json:"auto_analyze"`       // Auto-analyze on dwell
+	DwellTimeMs      int    `json:"dwell_time_ms"`      // Milliseconds before auto-analyze
+	PreferLocal      bool   `json:"prefer_local"`       // Prefer local models (Ollama) for speed
+	LocalForQuickOps bool   `json:"local_for_quick_ops"` // Use local for quick ops (top stories, etc)
 }
 
 // DefaultConfig returns sensible defaults
@@ -83,7 +96,7 @@ func DefaultConfig() *Config {
 				Enabled:  false,
 				Priority: 5,
 				Endpoint: "http://localhost:11434",
-				Model:    "llama3.2",
+				// Model auto-detected from Ollama if not specified
 			},
 		},
 		MCPServers: []MCPServerConfig{},
@@ -91,6 +104,14 @@ func DefaultConfig() *Config {
 			Theme:           "dark",
 			ShowSourcePanel: false,
 			ItemLimit:       500,
+			DensityMode:     "comfortable",
+		},
+		Analysis: AnalysisConfig{
+			Enabled:          true,
+			AutoAnalyze:      false, // Manual trigger by default
+			DwellTimeMs:      1000,  // 1 second dwell time if auto-analyze enabled
+			PreferLocal:      true,  // Prefer local models for speed
+			LocalForQuickOps: true,  // Use local for quick operations like top stories
 		},
 	}
 }

@@ -64,6 +64,19 @@ var DefaultRSSFeeds = []RSSFeedConfig{
 	{Name: "Google News Sci", URL: "https://news.google.com/rss/topics/CAAqJggKIiBDQkFTRWdvSUwyMHZNRFp0Y1RjU0FtVnVHZ0pWVXlnQVAB", Category: "aggregator", RefreshMinutes: RefreshLazy, Weight: 1.0},
 
 	// ============================================
+	// VIRAL / INTERNET CULTURE (Surfaces X/Twitter content)
+	// These sites cover trending tweets, viral content, and memes
+	// without requiring X API access
+	// ============================================
+	{Name: "Daily Dot", URL: "https://www.dailydot.com/feed/", Category: "viral", RefreshMinutes: RefreshNormal, Weight: 1.2},
+	{Name: "Daily Dot Viral", URL: "https://www.dailydot.com/tags/viral/feed/", Category: "viral", RefreshMinutes: RefreshNormal, Weight: 1.3},
+	{Name: "Daily Dot Social", URL: "https://www.dailydot.com/tags/social-media/feed/", Category: "viral", RefreshMinutes: RefreshNormal, Weight: 1.2},
+	{Name: "BuzzFeed Internet", URL: "https://www.buzzfeed.com/bestoftheinternet.xml", Category: "viral", RefreshMinutes: RefreshSlow, Weight: 1.1},
+	{Name: "Know Your Meme", URL: "https://knowyourmeme.com/newsfeed.rss", Category: "viral", RefreshMinutes: RefreshSlow, Weight: 1.2},
+	{Name: "Mashable", URL: "https://mashable.com/feeds/rss/all", Category: "viral", RefreshMinutes: RefreshSlow, Weight: 1.0},
+	{Name: "Input Mag", URL: "https://www.inputmag.com/rss", Category: "viral", RefreshMinutes: RefreshSlow, Weight: 1.0},
+
+	// ============================================
 	// REDDIT PUBLIC (Anonymous via .rss suffix)
 	// ============================================
 	{Name: "r/worldnews", URL: "https://www.reddit.com/r/worldnews/top/.rss?limit=25", Category: "reddit", RefreshMinutes: RefreshSlow, Weight: 1.1},
@@ -142,11 +155,47 @@ var DefaultRSSFeeds = []RSSFeedConfig{
 	// FINANCE & BUSINESS
 	// ============================================
 	{Name: "Bloomberg", URL: "https://feeds.bloomberg.com/markets/news.rss", Category: "finance", RefreshMinutes: RefreshNormal, Weight: 1.3},
+	{Name: "Bloomberg Politics", URL: "https://feeds.bloomberg.com/politics/news.rss", Category: "finance", RefreshMinutes: RefreshNormal, Weight: 1.2},
 	{Name: "CNBC Top", URL: "https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=100003114", Category: "finance", RefreshMinutes: RefreshNormal, Weight: 1.1},
+	{Name: "CNBC Markets", URL: "https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=20910258", Category: "finance", RefreshMinutes: RefreshNormal, Weight: 1.1},
 	{Name: "Financial Times", URL: "https://www.ft.com/rss/home", Category: "finance", RefreshMinutes: RefreshSlow, Weight: 1.3},
 	{Name: "MarketWatch", URL: "http://feeds.marketwatch.com/marketwatch/topstories/", Category: "finance", RefreshMinutes: RefreshNormal, Weight: 1.0},
+	{Name: "MarketWatch Breaking", URL: "http://feeds.marketwatch.com/marketwatch/marketpulse/", Category: "finance", RefreshMinutes: RefreshFast, Weight: 1.2},
 	{Name: "Economist", URL: "https://www.economist.com/latest/rss.xml", Category: "finance", RefreshMinutes: RefreshHourly, Weight: 1.4},
 	{Name: "Forbes", URL: "https://www.forbes.com/real-time/feed2/", Category: "finance", RefreshMinutes: RefreshSlow, Weight: 0.9},
+	{Name: "Yahoo Finance", URL: "https://finance.yahoo.com/news/rssindex", Category: "finance", RefreshMinutes: RefreshNormal, Weight: 1.0},
+	{Name: "Barron's", URL: "https://www.barrons.com/feed", Category: "finance", RefreshMinutes: RefreshSlow, Weight: 1.2},
+	{Name: "Seeking Alpha", URL: "https://seekingalpha.com/feed.xml", Category: "finance", RefreshMinutes: RefreshSlow, Weight: 1.0},
+	{Name: "Zero Hedge", URL: "https://feeds.feedburner.com/zerohedge/feed", Category: "finance", RefreshMinutes: RefreshNormal, Weight: 1.1},
+	{Name: "Calculated Risk", URL: "https://www.calculatedriskblog.com/feeds/posts/default", Category: "finance", RefreshMinutes: RefreshLazy, Weight: 1.2},
+	{Name: "Naked Capitalism", URL: "https://www.nakedcapitalism.com/feed", Category: "finance", RefreshMinutes: RefreshLazy, Weight: 1.1},
+	{Name: "Fed Reserve", URL: "https://www.federalreserve.gov/feeds/press_all.xml", Category: "finance", RefreshMinutes: RefreshSlow, Weight: 1.4},
+	{Name: "r/wallstreetbets", URL: "https://www.reddit.com/r/wallstreetbets/hot/.rss?limit=25", Category: "finance", RefreshMinutes: RefreshSlow, Weight: 0.9},
+	{Name: "r/investing", URL: "https://www.reddit.com/r/investing/hot/.rss?limit=25", Category: "finance", RefreshMinutes: RefreshLazy, Weight: 1.0},
+	{Name: "r/stocks", URL: "https://www.reddit.com/r/stocks/hot/.rss?limit=25", Category: "finance", RefreshMinutes: RefreshLazy, Weight: 1.0},
+
+	// ============================================
+	// MILITARY & DEFENSE
+	// ============================================
+	{Name: "Defense News", URL: "https://www.defensenews.com/arc/outboundfeeds/rss/?outputType=xml", Category: "military", RefreshMinutes: RefreshSlow, Weight: 1.3},
+	{Name: "Breaking Defense", URL: "https://breakingdefense.com/feed/", Category: "military", RefreshMinutes: RefreshSlow, Weight: 1.3},
+	{Name: "Defense One", URL: "https://www.defenseone.com/rss/all/", Category: "military", RefreshMinutes: RefreshSlow, Weight: 1.2},
+	{Name: "The War Zone", URL: "https://www.thedrive.com/the-war-zone/feed", Category: "military", RefreshMinutes: RefreshNormal, Weight: 1.4},
+	{Name: "Military Times", URL: "https://www.militarytimes.com/arc/outboundfeeds/rss/?outputType=xml", Category: "military", RefreshMinutes: RefreshSlow, Weight: 1.2},
+	{Name: "C4ISRNET", URL: "https://www.c4isrnet.com/arc/outboundfeeds/rss/?outputType=xml", Category: "military", RefreshMinutes: RefreshLazy, Weight: 1.1},
+	{Name: "Stars & Stripes", URL: "https://www.stripes.com/rss", Category: "military", RefreshMinutes: RefreshSlow, Weight: 1.1},
+	{Name: "War on the Rocks", URL: "https://warontherocks.com/feed/", Category: "military", RefreshMinutes: RefreshLazy, Weight: 1.3},
+	{Name: "Naval News", URL: "https://www.navalnews.com/feed/", Category: "military", RefreshMinutes: RefreshLazy, Weight: 1.1},
+	{Name: "Air & Space Forces", URL: "https://www.airandspaceforces.com/feed/", Category: "military", RefreshMinutes: RefreshLazy, Weight: 1.1},
+	{Name: "Army Times", URL: "https://www.armytimes.com/arc/outboundfeeds/rss/?outputType=xml", Category: "military", RefreshMinutes: RefreshLazy, Weight: 1.0},
+	{Name: "Navy Times", URL: "https://www.navytimes.com/arc/outboundfeeds/rss/?outputType=xml", Category: "military", RefreshMinutes: RefreshLazy, Weight: 1.0},
+	{Name: "USNI News", URL: "https://news.usni.org/feed", Category: "military", RefreshMinutes: RefreshLazy, Weight: 1.2},
+	{Name: "Janes", URL: "https://www.janes.com/feeds/news", Category: "military", RefreshMinutes: RefreshLazy, Weight: 1.4},
+	{Name: "r/CredibleDefense", URL: "https://www.reddit.com/r/CredibleDefense/hot/.rss?limit=25", Category: "military", RefreshMinutes: RefreshLazy, Weight: 1.2},
+	{Name: "r/LessCredibleDefence", URL: "https://www.reddit.com/r/LessCredibleDefence/hot/.rss?limit=25", Category: "military", RefreshMinutes: RefreshLazy, Weight: 1.0},
+	{Name: "r/ukraine", URL: "https://www.reddit.com/r/ukraine/hot/.rss?limit=25", Category: "military", RefreshMinutes: RefreshSlow, Weight: 1.1},
+	{Name: "r/CombatFootage", URL: "https://www.reddit.com/r/CombatFootage/hot/.rss?limit=25", Category: "military", RefreshMinutes: RefreshSlow, Weight: 1.0},
+	{Name: "ISW", URL: "https://www.understandingwar.org/rss.xml", Category: "military", RefreshMinutes: RefreshLazy, Weight: 1.4},
 
 	// ============================================
 	// POLITICS & POLICY
@@ -246,6 +295,7 @@ func Categories() []string {
 		"ai",
 		"science",
 		"finance",
+		"military", // Defense, geopolitics, conflict
 		"politics",
 		"security",
 		"crypto",

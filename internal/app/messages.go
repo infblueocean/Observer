@@ -1,6 +1,7 @@
 package app
 
 import (
+	"github.com/abelbrown/observer/internal/brain"
 	"github.com/abelbrown/observer/internal/feeds"
 )
 
@@ -19,3 +20,15 @@ type RefreshMsg struct{}
 
 // TickMsg is sent periodically for auto-refresh
 type TickMsg struct{}
+
+// BrainTrustAnalysisMsg is sent when a Brain Trust analysis completes
+type BrainTrustAnalysisMsg struct {
+	ItemID   string
+	Analysis brain.Analysis
+}
+
+// TopStoriesMsg is sent when AI top stories analysis completes
+type TopStoriesMsg struct {
+	Stories []brain.TopStoryResult
+	Err     error
+}

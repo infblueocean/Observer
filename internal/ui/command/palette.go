@@ -22,9 +22,12 @@ func DefaultCommands() []Command {
 		{Name: "sources", Description: "Manage feed sources", Key: "S"},
 		{Name: "filters", Aliases: []string{"filter"}, Description: "Manage filters", Key: "f"},
 		{Name: "config", Aliases: []string{"settings"}, Description: "Configure API keys & settings", Key: "c"},
+		{Name: "density", Aliases: []string{"compact", "comfortable"}, Description: "Toggle compact/comfortable view", Key: "v"},
 		{Name: "refresh", Description: "Refresh all feeds", Key: "R"},
 		{Name: "shuffle", Description: "Randomize item order", Key: "s"},
 		{Name: "panel", Description: "Toggle source panel"},
+		{Name: "analyze", Aliases: []string{"ai", "brain", "braintrust"}, Description: "AI analysis of selected item", Key: "a"},
+		{Name: "top", Aliases: []string{"breaking", "headlines"}, Description: "Refresh top/breaking stories", Key: "T"},
 		{Name: "help", Description: "Show help", Key: "?"},
 		{Name: "quit", Aliases: []string{"exit", "q"}, Description: "Exit Observer", Key: "q"},
 	}
@@ -132,11 +135,16 @@ func (p Palette) Update(msg tea.Msg) (Palette, tea.Cmd, string) {
 		}
 	}
 
+	// Track if input value changed
+	oldValue := p.input.Value()
+
 	var cmd tea.Cmd
 	p.input, cmd = p.input.Update(msg)
 
-	// Filter commands based on input
-	p.filter()
+	// Only filter when input actually changes
+	if p.input.Value() != oldValue {
+		p.filter()
+	}
 
 	return p, cmd, ""
 }
@@ -220,9 +228,25 @@ func (p Palette) View() string {
 		Render(strings.Repeat("─", p.width-8)))
 	b.WriteString("\n")
 
-	// Commands (max 6 visible)
-	visible := min(6, len(p.filtered))
-	for i := 0; i < visible; i++ {
+	// Commands (max 8 visible, scrolls with cursor)
+	maxVisible := min(8, len(p.filtered))
+
+	// Calculate scroll offset to keep cursor visible
+	start := 0
+	if p.cursor >= maxVisible {
+		start = p.cursor - maxVisible + 1
+	}
+	end := min(start+maxVisible, len(p.filtered))
+
+	// Show scroll indicator if there are items above
+	if start > 0 {
+		b.WriteString(descStyle.Render("  ↑ more above"))
+		b.WriteString("\n")
+		maxVisible-- // Account for the indicator line
+		end = min(start+maxVisible, len(p.filtered))
+	}
+
+	for i := start; i < end; i++ {
 		cmd := p.filtered[i]
 
 		// Command name and description
@@ -248,6 +272,12 @@ func (p Palette) View() string {
 		}
 
 		b.WriteString(line)
+		b.WriteString("\n")
+	}
+
+	// Show scroll indicator if there are items below
+	if end < len(p.filtered) {
+		b.WriteString(descStyle.Render("  ↓ more below"))
 		b.WriteString("\n")
 	}
 
