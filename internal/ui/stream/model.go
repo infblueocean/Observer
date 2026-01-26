@@ -122,6 +122,56 @@ func bandLabel(band timeBand) string {
 	return ""
 }
 
+// interleaveWithinBands reorders items so sources are spread evenly within each time band
+// Instead of: [A1, A2, A3, B1, B2, C1] (chronological clusters)
+// Produces:   [A1, B1, C1, A2, B2, A3] (interleaved by source)
+func interleaveWithinBands(items []feeds.Item) []feeds.Item {
+	if len(items) == 0 {
+		return items
+	}
+
+	// Group items by time band
+	bandItems := make(map[timeBand][]feeds.Item)
+	for _, item := range items {
+		band := getTimeBand(item.Published)
+		bandItems[band] = append(bandItems[band], item)
+	}
+
+	// Interleave items within each band
+	result := make([]feeds.Item, 0, len(items))
+	for _, band := range []timeBand{bandJustNow, bandPastHour, bandToday, bandYesterday, bandOlder} {
+		bandList := bandItems[band]
+		if len(bandList) == 0 {
+			continue
+		}
+
+		// Group by source within this band
+		sourceItems := make(map[string][]feeds.Item)
+		var sourceOrder []string // preserve first-seen order of sources
+		for _, item := range bandList {
+			if _, exists := sourceItems[item.SourceName]; !exists {
+				sourceOrder = append(sourceOrder, item.SourceName)
+			}
+			sourceItems[item.SourceName] = append(sourceItems[item.SourceName], item)
+		}
+
+		// Round-robin through sources
+		sourceIdx := make(map[string]int)
+		for added := 0; added < len(bandList); {
+			for _, source := range sourceOrder {
+				idx := sourceIdx[source]
+				if idx < len(sourceItems[source]) {
+					result = append(result, sourceItems[source][idx])
+					sourceIdx[source]++
+					added++
+				}
+			}
+		}
+	}
+
+	return result
+}
+
 // sourceActivity tracks recent activity for a source
 type sourceActivity struct {
 	recentCount int       // items in last hour
@@ -298,16 +348,18 @@ func (m *Model) SetSize(width, height int) {
 
 // SetItems replaces the current items
 func (m *Model) SetItems(items []feeds.Item) {
-	m.items = items
+	// Interleave sources within time bands for uniform sampling
+	// This prevents clusters of items from the same source
+	m.items = interleaveWithinBands(items)
 	m.loading = false
-	if m.cursor >= len(items) {
-		m.cursor = max(0, len(items)-1)
+	if m.cursor >= len(m.items) {
+		m.cursor = max(0, len(m.items)-1)
 	}
 
 	// Calculate source activity stats
 	m.sourceStats = make(map[string]sourceActivity)
 	oneHourAgo := time.Now().Add(-time.Hour)
-	for _, item := range items {
+	for _, item := range m.items {
 		stats := m.sourceStats[item.SourceName]
 		if item.Published.After(oneHourAgo) {
 			stats.recentCount++
@@ -324,7 +376,7 @@ func (m *Model) SetItems(items []feeds.Item) {
 	}
 }
 
-// SetTopStories sets the AI-identified top stories with deduplication
+// SetTopStories sets the AI-identified top stories with deduplication and source balancing
 func (m *Model) SetTopStories(stories []TopStory) {
 	if stories == nil {
 		m.topStories = nil
@@ -355,9 +407,54 @@ func (m *Model) SetTopStories(stories []TopStory) {
 		dedupedStories = append(dedupedStories, story)
 	}
 
-	m.topStories = dedupedStories
+	// Balance sources - no single source should dominate
+	m.topStories = balanceTopStoriesBySources(dedupedStories, 2) // max 2 per source
 	m.topStoriesLoading = false
 	m.topStoriesLastRefresh = time.Now()
+}
+
+// balanceTopStoriesBySources limits stories per source for uniform representation
+// Prioritizes higher-confidence stories (by status/hit count) while ensuring diversity
+func balanceTopStoriesBySources(stories []TopStory, maxPerSource int) []TopStory {
+	if len(stories) <= maxPerSource {
+		return stories
+	}
+
+	// Group by source, preserving order (which is already priority-sorted)
+	sourceStories := make(map[string][]TopStory)
+	var sourceOrder []string
+	for _, story := range stories {
+		if story.Item == nil {
+			continue
+		}
+		source := story.Item.SourceName
+		if _, exists := sourceStories[source]; !exists {
+			sourceOrder = append(sourceOrder, source)
+		}
+		sourceStories[source] = append(sourceStories[source], story)
+	}
+
+	// Round-robin through sources, taking one at a time up to maxPerSource each
+	var balanced []TopStory
+	sourceIdx := make(map[string]int)
+
+	// Keep going until we've exhausted all sources or hit the original count
+	for len(balanced) < len(stories) {
+		added := false
+		for _, source := range sourceOrder {
+			idx := sourceIdx[source]
+			if idx < len(sourceStories[source]) && idx < maxPerSource {
+				balanced = append(balanced, sourceStories[source][idx])
+				sourceIdx[source]++
+				added = true
+			}
+		}
+		if !added {
+			break // All sources exhausted within their limits
+		}
+	}
+
+	return balanced
 }
 
 // TopStoriesNeedsRefresh returns true if top stories should be refreshed

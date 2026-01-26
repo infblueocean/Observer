@@ -59,6 +59,117 @@ func TestBandLabel(t *testing.T) {
 	}
 }
 
+func TestInterleaveWithinBands(t *testing.T) {
+	now := time.Now()
+
+	// Create items from 3 sources, all in "past hour" band
+	items := []feeds.Item{
+		{ID: "A1", SourceName: "Source A", Published: now.Add(-15 * time.Minute)},
+		{ID: "A2", SourceName: "Source A", Published: now.Add(-16 * time.Minute)},
+		{ID: "A3", SourceName: "Source A", Published: now.Add(-17 * time.Minute)},
+		{ID: "B1", SourceName: "Source B", Published: now.Add(-18 * time.Minute)},
+		{ID: "B2", SourceName: "Source B", Published: now.Add(-19 * time.Minute)},
+		{ID: "C1", SourceName: "Source C", Published: now.Add(-20 * time.Minute)},
+	}
+
+	result := interleaveWithinBands(items)
+
+	// Should have same count
+	if len(result) != len(items) {
+		t.Fatalf("Expected %d items, got %d", len(items), len(result))
+	}
+
+	// First 3 items should be from different sources (round-robin)
+	sources := make(map[string]bool)
+	for i := 0; i < 3 && i < len(result); i++ {
+		sources[result[i].SourceName] = true
+	}
+	if len(sources) != 3 {
+		t.Errorf("Expected first 3 items from 3 different sources, got sources: %v", sources)
+	}
+
+	// Items should be interleaved: A, B, C, A, B, A (round-robin order)
+	expectedOrder := []string{"A1", "B1", "C1", "A2", "B2", "A3"}
+	for i, item := range result {
+		if item.ID != expectedOrder[i] {
+			t.Errorf("Position %d: expected %s, got %s", i, expectedOrder[i], item.ID)
+		}
+	}
+}
+
+func TestInterleavePreservesBandOrder(t *testing.T) {
+	now := time.Now()
+
+	// Items from different time bands
+	items := []feeds.Item{
+		{ID: "now1", SourceName: "A", Published: now.Add(-5 * time.Minute)},  // Just Now
+		{ID: "now2", SourceName: "B", Published: now.Add(-6 * time.Minute)},  // Just Now
+		{ID: "hour1", SourceName: "A", Published: now.Add(-30 * time.Minute)}, // Past Hour
+		{ID: "hour2", SourceName: "B", Published: now.Add(-31 * time.Minute)}, // Past Hour
+		{ID: "old1", SourceName: "A", Published: now.Add(-3 * time.Hour)},     // Today
+	}
+
+	result := interleaveWithinBands(items)
+
+	// Bands should still be in order: Just Now, Past Hour, Today
+	var bands []timeBand
+	for _, item := range result {
+		band := getTimeBand(item.Published)
+		if len(bands) == 0 || bands[len(bands)-1] != band {
+			bands = append(bands, band)
+		}
+	}
+
+	expectedBands := []timeBand{bandJustNow, bandPastHour, bandToday}
+	if len(bands) != len(expectedBands) {
+		t.Fatalf("Expected %d bands, got %d", len(expectedBands), len(bands))
+	}
+	for i, band := range bands {
+		if band != expectedBands[i] {
+			t.Errorf("Band %d: expected %v, got %v", i, expectedBands[i], band)
+		}
+	}
+}
+
+func TestBalanceTopStoriesBySources(t *testing.T) {
+	// Create stories with CNN dominating
+	stories := []TopStory{
+		{Item: &feeds.Item{ID: "cnn1", SourceName: "CNN"}, Label: "● NEW"},
+		{Item: &feeds.Item{ID: "cnn2", SourceName: "CNN"}, Label: "● NEW"},
+		{Item: &feeds.Item{ID: "cnn3", SourceName: "CNN"}, Label: "● NEW"},
+		{Item: &feeds.Item{ID: "cnn4", SourceName: "CNN"}, Label: "● NEW"},
+		{Item: &feeds.Item{ID: "bbc1", SourceName: "BBC"}, Label: "● NEW"},
+		{Item: &feeds.Item{ID: "reu1", SourceName: "Reuters"}, Label: "● NEW"},
+	}
+
+	// Balance with max 2 per source
+	result := balanceTopStoriesBySources(stories, 2)
+
+	// Count by source
+	sourceCounts := make(map[string]int)
+	for _, story := range result {
+		sourceCounts[story.Item.SourceName]++
+	}
+
+	// CNN should be limited to 2
+	if sourceCounts["CNN"] > 2 {
+		t.Errorf("CNN should be limited to 2, got %d", sourceCounts["CNN"])
+	}
+
+	// Should have BBC and Reuters
+	if sourceCounts["BBC"] != 1 {
+		t.Errorf("Expected 1 BBC story, got %d", sourceCounts["BBC"])
+	}
+	if sourceCounts["Reuters"] != 1 {
+		t.Errorf("Expected 1 Reuters story, got %d", sourceCounts["Reuters"])
+	}
+
+	// Total should be 4 (2 CNN + 1 BBC + 1 Reuters)
+	if len(result) != 4 {
+		t.Errorf("Expected 4 balanced stories, got %d", len(result))
+	}
+}
+
 func TestGetSourceAbbrev(t *testing.T) {
 	tests := []struct {
 		name     string
