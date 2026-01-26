@@ -26,8 +26,8 @@ TOP|3|Climate agreement`
 		t.Errorf("Expected 3 results, got %d", len(results))
 	}
 
-	if results[0].Label != "🔴 BREAKING" {
-		t.Errorf("Expected BREAKING label, got %s", results[0].Label)
+	if results[0].Label != "● NEW" {
+		t.Errorf("Expected NEW label, got %s", results[0].Label)
 	}
 	if results[0].ItemID != "1" {
 		t.Errorf("Expected item ID 1, got %s", results[0].ItemID)
@@ -76,11 +76,11 @@ func TestMapLabel(t *testing.T) {
 		input    string
 		expected string
 	}{
-		{"BREAKING", "🔴 BREAKING"},
-		{"breaking", "🔴 BREAKING"},
-		{"DEVELOPING", "🟡 DEVELOPING"},
-		{"TOP", "📌 TOP STORY"},
-		{"TOP STORY", "📌 TOP STORY"},
+		{"BREAKING", "● NEW"},
+		{"breaking", "● NEW"},
+		{"DEVELOPING", "◐ EMERGING"},
+		{"TOP", "◦ NOTED"},
+		{"TOP STORY", "◦ NOTED"},
 		{"invalid", ""},
 	}
 
@@ -116,8 +116,8 @@ func TestTopStoriesCache(t *testing.T) {
 
 	// Simulate first analysis results
 	results1 := []TopStoryResult{
-		{ItemID: "story-1", Label: "🔴 BREAKING", Reason: "Major event"},
-		{ItemID: "story-2", Label: "🟡 DEVELOPING", Reason: "Ongoing"},
+		{ItemID: "story-1", Label: "● NEW", Reason: "Major event"},
+		{ItemID: "story-2", Label: "◐ EMERGING", Reason: "Ongoing"},
 	}
 	itemTitles := map[string]string{
 		"story-1": "Major earthquake hits",
@@ -144,8 +144,8 @@ func TestTopStoriesCache(t *testing.T) {
 
 	// Simulate second analysis - story-1 appears again (streak), story-3 is new
 	results2 := []TopStoryResult{
-		{ItemID: "story-1", Label: "🔴 BREAKING", Reason: "Still major"},
-		{ItemID: "story-3", Label: "📌 TOP STORY", Reason: "New story"},
+		{ItemID: "story-1", Label: "● NEW", Reason: "Still major"},
+		{ItemID: "story-3", Label: "◦ NOTED", Reason: "New story"},
 	}
 	itemTitles["story-3"] = "Climate summit begins"
 
@@ -249,8 +249,12 @@ func TestCalculateStatus(t *testing.T) {
 		{4, 0, StatusPersistent},
 		{5, 0, StatusPersistent},
 		{10, 0, StatusPersistent},
-		{5, 2, StatusFading},  // High hit but many misses = fading
-		{1, 3, StatusFading},  // Even new stories fade if missed
+		{4, 1, StatusSustained},  // High hit, missed once = sustained
+		{5, 1, StatusSustained},  // Still sustained
+		{10, 1, StatusSustained}, // High confidence sustained
+		{5, 2, StatusFading},     // High hit but many misses = fading
+		{1, 3, StatusFading},     // Even new stories fade if missed
+		{3, 1, StatusDeveloping}, // Not enough hits for sustained
 	}
 
 	for _, tt := range tests {
@@ -270,7 +274,7 @@ func TestGetBreathingTopStories(t *testing.T) {
 	a.topStoriesCache.entries["persistent-story"] = &CachedTopStory{
 		ItemID:    "persistent-story",
 		Title:     "Major Ongoing Event",
-		Label:     "🟠 ONGOING",
+		Label:     "◉ ONGOING",
 		Reason:    "Still developing",
 		FirstSeen: now.Add(-2 * time.Hour),
 		LastSeen:  now.Add(-1 * time.Minute),
@@ -280,7 +284,7 @@ func TestGetBreathingTopStories(t *testing.T) {
 	a.topStoriesCache.entries["fading-story"] = &CachedTopStory{
 		ItemID:    "fading-story",
 		Title:     "Old Story",
-		Label:     "⚪ FADING",
+		Label:     "○ FADING",
 		Reason:    "Was important",
 		FirstSeen: now.Add(-4 * time.Hour),
 		LastSeen:  now.Add(-30 * time.Minute),
@@ -290,8 +294,8 @@ func TestGetBreathingTopStories(t *testing.T) {
 
 	// Current results from LLM
 	currentResults := []TopStoryResult{
-		{ItemID: "new-breaking", Label: "🔴 BREAKING", Reason: "Just happened", HitCount: 1, Status: StatusBreaking},
-		{ItemID: "current-developing", Label: "🟡 DEVELOPING", Reason: "Ongoing", HitCount: 2, Status: StatusDeveloping},
+		{ItemID: "new-breaking", Label: "● NEW", Reason: "Just happened", HitCount: 1, Status: StatusBreaking},
+		{ItemID: "current-developing", Label: "◐ EMERGING", Reason: "Ongoing", HitCount: 2, Status: StatusDeveloping},
 	}
 
 	// Get breathing list
@@ -323,12 +327,16 @@ func TestGetBreathingTopStories(t *testing.T) {
 func TestStoryLess(t *testing.T) {
 	breaking := TopStoryResult{Status: StatusBreaking, HitCount: 1}
 	persistent := TopStoryResult{Status: StatusPersistent, HitCount: 5}
+	sustained := TopStoryResult{Status: StatusSustained, HitCount: 4}
 	developing := TopStoryResult{Status: StatusDeveloping, HitCount: 2}
 	fading := TopStoryResult{Status: StatusFading, HitCount: 3}
 
 	// Breaking should come before everything
 	if !storyLess(breaking, persistent) {
 		t.Error("Breaking should come before persistent")
+	}
+	if !storyLess(breaking, sustained) {
+		t.Error("Breaking should come before sustained")
 	}
 	if !storyLess(breaking, developing) {
 		t.Error("Breaking should come before developing")
@@ -337,12 +345,23 @@ func TestStoryLess(t *testing.T) {
 		t.Error("Breaking should come before fading")
 	}
 
-	// Persistent should come before developing and fading
+	// Persistent should come before sustained, developing and fading
+	if !storyLess(persistent, sustained) {
+		t.Error("Persistent should come before sustained")
+	}
 	if !storyLess(persistent, developing) {
 		t.Error("Persistent should come before developing")
 	}
 	if !storyLess(persistent, fading) {
 		t.Error("Persistent should come before fading")
+	}
+
+	// Sustained should come before developing and fading
+	if !storyLess(sustained, developing) {
+		t.Error("Sustained should come before developing")
+	}
+	if !storyLess(sustained, fading) {
+		t.Error("Sustained should come before fading")
 	}
 
 	// Within same status, higher hit count wins
@@ -367,7 +386,7 @@ func TestGetTopStoriesContext(t *testing.T) {
 	a.topStoriesCache.entries["story-1"] = &CachedTopStory{
 		ItemID:    "story-1",
 		Title:     "Major Breaking News Event",
-		Label:     "🔴 BREAKING",
+		Label:     "● NEW",
 		HitCount:  3,
 		MissCount: 0,
 		LastSeen:  now,
@@ -375,7 +394,7 @@ func TestGetTopStoriesContext(t *testing.T) {
 	a.topStoriesCache.entries["story-2"] = &CachedTopStory{
 		ItemID:    "story-2",
 		Title:     "Developing Story Updates",
-		Label:     "🟡 DEVELOPING",
+		Label:     "◐ EMERGING",
 		HitCount:  2,
 		MissCount: 0,
 		LastSeen:  now,
@@ -384,7 +403,7 @@ func TestGetTopStoriesContext(t *testing.T) {
 	a.topStoriesCache.entries["story-3"] = &CachedTopStory{
 		ItemID:    "story-3",
 		Title:     "Old Fading Story",
-		Label:     "⚪ FADING",
+		Label:     "○ FADING",
 		HitCount:  1,
 		MissCount: 3, // Too many misses = fading
 		LastSeen:  now.Add(-1 * time.Hour),

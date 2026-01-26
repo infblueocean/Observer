@@ -431,8 +431,9 @@ type TopStoryStatus string
 const (
 	StatusBreaking   TopStoryStatus = "breaking"   // New, first 1-2 identifications
 	StatusDeveloping TopStoryStatus = "developing" // Hit count 2-3, gaining traction
-	StatusPersistent TopStoryStatus = "persistent" // Hit count 4+, major ongoing story
-	StatusFading     TopStoryStatus = "fading"     // Not identified recently, cooling off
+	StatusPersistent TopStoryStatus = "persistent" // Hit count 4+, major ongoing story, actively identified
+	StatusSustained  TopStoryStatus = "sustained"  // High hit count but missed once, still important background
+	StatusFading     TopStoryStatus = "fading"     // Missed 2+, cooling off
 )
 
 // CachedTopStory tracks a story's importance over time
@@ -753,6 +754,10 @@ func calculateStatus(hitCount, missCount int) TopStoryStatus {
 	if missCount >= 2 {
 		return StatusFading
 	}
+	// High hit count but missed once = sustained (still important, but not actively breaking)
+	if hitCount >= 4 && missCount == 1 {
+		return StatusSustained
+	}
 	if hitCount >= 4 {
 		return StatusPersistent
 	}
@@ -951,12 +956,13 @@ func sortTopStories(stories []TopStoryResult) {
 
 // storyLess returns true if a should come before b
 func storyLess(a, b TopStoryResult) bool {
-	// Priority order: Breaking > Persistent > Developing > Fading
+	// Priority order: Breaking > Persistent > Sustained > Developing > Fading
 	statusPriority := map[TopStoryStatus]int{
 		StatusBreaking:   0,
 		StatusPersistent: 1,
-		StatusDeveloping: 2,
-		StatusFading:     3,
+		StatusSustained:  2,
+		StatusDeveloping: 3,
+		StatusFading:     4,
 	}
 
 	aPri := statusPriority[a.Status]
@@ -976,21 +982,30 @@ func storyLess(a, b TopStoryResult) bool {
 }
 
 // labelForStatus returns the display label based on status
+// Uses conservative indicators - local LLMs can be inconsistent,
+// so we don't want to oversell stories based on few hits
 func labelForStatus(status TopStoryStatus, hitCount int) string {
 	switch status {
 	case StatusBreaking:
-		return "🔴 BREAKING"
+		// Single hit - might be noise, use neutral indicator
+		return "● NEW"
 	case StatusDeveloping:
-		return "🟡 DEVELOPING"
+		// 2-3 hits - starting to look real
+		return "◐ EMERGING"
 	case StatusPersistent:
+		// 4+ hits with no misses - confirmed important
 		if hitCount >= 6 {
-			return "🔥 MAJOR"
+			// Strong signal, many consistent hits
+			return "★ MAJOR"
 		}
-		return "🟠 ONGOING"
+		return "◉ ONGOING"
+	case StatusSustained:
+		// Was persistent, missed once, still tracking
+		return "◑ SUSTAINED"
 	case StatusFading:
-		return "⚪ FADING"
+		return "○ FADING"
 	default:
-		return "📌 TOP STORY"
+		return "◦ NOTED"
 	}
 }
 
@@ -1267,12 +1282,12 @@ func parseTopStoriesMarkdown(content string, items []feeds.Item, maxItems int) [
 					continue
 				}
 
-				// Determine label based on position
-				label := "📌 TOP STORY"
+				// Determine label based on position (conservative - single hit might be noise)
+				label := "◦ NOTED"
 				if foundCount == 0 {
-					label = "🔴 BREAKING"
+					label = "● NEW"
 				} else if foundCount == 1 {
-					label = "🟡 DEVELOPING"
+					label = "◐ EMERGING"
 				}
 
 				// Extract reason (text after colon or dash)
@@ -1301,15 +1316,16 @@ func parseTopStoriesMarkdown(content string, items []feeds.Item, maxItems int) [
 	return results
 }
 
-// mapLabel converts label string to emoji label
+// mapLabel converts label string to conservative indicator
+// Uses neutral symbols since single hit might be noise from inconsistent LLM
 func mapLabel(label string) string {
 	switch strings.ToUpper(strings.TrimSpace(label)) {
 	case "BREAKING":
-		return "🔴 BREAKING"
+		return "● NEW"
 	case "DEVELOPING":
-		return "🟡 DEVELOPING"
+		return "◐ EMERGING"
 	case "TOP", "TOP STORY":
-		return "📌 TOP STORY"
+		return "◦ NOTED"
 	default:
 		return ""
 	}

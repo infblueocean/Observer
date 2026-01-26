@@ -254,11 +254,16 @@ AI-powered news analysis with multiple providers:
 The top stories section expands and contracts based on what's actually happening.
 Instead of always showing exactly 3, it shows 2-8 stories based on the news cycle.
 
-**Story Lifecycle:**
-- 🔴 **BREAKING**: New, first 1-2 identifications, urgent
-- 🟡 **DEVELOPING**: Hit count 2-3, gaining traction
-- 🔥 **MAJOR** / 🟠 **ONGOING**: Hit count 4+, persistent major story
-- ⚪ **FADING**: Not identified recently, cooling off (dimmed)
+**Story Lifecycle (Conservative Labels):**
+
+Local LLMs can be inconsistent, so we use conservative indicators that require confidence:
+
+- ● **NEW**: Single hit - might be noise, neutral styling
+- ◐ **EMERGING**: Hit count 2-3, starting to look real
+- ◉ **ONGOING**: Hit count 4+, confirmed persistent story
+- ★ **MAJOR**: Hit count 6+, high confidence major story (only one with bold)
+- ◑ **SUSTAINED**: Was ongoing, missed once, still tracking
+- ○ **FADING**: Missed 2+ times, cooling off (dimmed)
 
 **Smart Merging:**
 - Current LLM results merged with high-confidence cached stories
@@ -266,7 +271,9 @@ Instead of always showing exactly 3, it shows 2-8 stories based on the news cycl
 - Fading stories auto-removed after 3 consecutive misses
 
 **Display:**
-- `[LABEL] Title · Source 🔥×5` - Fire + count for high-confidence stories
+- `[◉ ONGOING] Title · Source ×5` - Hit count shown for tracked stories
+- NEW/EMERGING stories use neutral styling until confidence established
+- MAJOR stories (6+ hits) are the only ones with bold styling
 - Fading stories are dimmed, no reason line shown
 - Duration shown for ongoing stories: `(top for 2h)`
 

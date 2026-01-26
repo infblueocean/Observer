@@ -142,11 +142,15 @@ type TopStory struct {
 	MissCount int       // How many consecutive analyses missed this
 }
 
-// TopStoryLabel types
+// TopStoryLabel types (conservative - local LLM can be inconsistent)
 const (
-	LabelBreaking   = "🔴 BREAKING"
-	LabelDeveloping = "🟡 DEVELOPING"
-	LabelTopStory   = "📌 TOP STORY"
+	LabelNew      = "● NEW"
+	LabelEmerging = "◐ EMERGING"
+	LabelOngoing  = "◉ ONGOING"
+	LabelMajor    = "★ MAJOR"
+	LabelSustained = "◑ SUSTAINED"
+	LabelFading   = "○ FADING"
+	LabelNoted    = "◦ NOTED"
 )
 
 // Sparkline characters (8 levels)
@@ -563,45 +567,55 @@ func (m Model) renderTopStoriesSection() []string {
 		}
 
 		// Determine if this story is fading (dimmed styling)
-		isFading := story.Status == "fading" || story.MissCount > 0
+		// Note: sustained stories (missCount==1) are NOT fading - they're still important
+		isFading := story.Status == "fading" || story.MissCount >= 2
 
 		// Label with appropriate color based on status
+		// Conservative styling - only use bold/prominent colors for high-confidence stories
 		var labelStyle lipgloss.Style
 		switch {
-		case strings.Contains(story.Label, "BREAKING"):
+		case strings.Contains(story.Label, "NEW"):
+			// Single hit - neutral styling, might be noise
 			labelStyle = lipgloss.NewStyle().
-				Foreground(lipgloss.Color("#0d1117")).
-				Background(lipgloss.Color("#f85149")).
-				Bold(true).
+				Foreground(lipgloss.Color("#c9d1d9")).
+				Background(lipgloss.Color("#30363d")).
 				Padding(0, 1)
-		case strings.Contains(story.Label, "DEVELOPING"):
+		case strings.Contains(story.Label, "EMERGING"):
+			// 2-3 hits - starting to look real, slightly more prominent
 			labelStyle = lipgloss.NewStyle().
 				Foreground(lipgloss.Color("#0d1117")).
 				Background(lipgloss.Color("#d29922")).
-				Bold(true).
 				Padding(0, 1)
 		case strings.Contains(story.Label, "MAJOR"):
+			// High confidence (6+ hits) - use prominent styling
 			labelStyle = lipgloss.NewStyle().
 				Foreground(lipgloss.Color("#0d1117")).
 				Background(lipgloss.Color("#f85149")).
 				Bold(true).
 				Padding(0, 1)
 		case strings.Contains(story.Label, "ONGOING"):
+			// Persistent (4+ hits) - confirmed important
 			labelStyle = lipgloss.NewStyle().
 				Foreground(lipgloss.Color("#0d1117")).
 				Background(lipgloss.Color("#f0883e")).
-				Bold(true).
 				Padding(0, 1)
-		case strings.Contains(story.Label, "FADING"):
-			labelStyle = lipgloss.NewStyle().
-				Foreground(lipgloss.Color("#0d1117")).
-				Background(lipgloss.Color("#6e7681")).
-				Padding(0, 1)
-		default:
+		case strings.Contains(story.Label, "SUSTAINED"):
+			// Was persistent, missed once - still tracking
 			labelStyle = lipgloss.NewStyle().
 				Foreground(lipgloss.Color("#0d1117")).
 				Background(lipgloss.Color("#58a6ff")).
-				Bold(true).
+				Padding(0, 1)
+		case strings.Contains(story.Label, "FADING"):
+			// Missed 2+ times - dimmed
+			labelStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("#8b949e")).
+				Background(lipgloss.Color("#21262d")).
+				Padding(0, 1)
+		default:
+			// NOTED or unknown - neutral
+			labelStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("#8b949e")).
+				Background(lipgloss.Color("#30363d")).
 				Padding(0, 1)
 		}
 
