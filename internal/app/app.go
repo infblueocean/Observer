@@ -1058,7 +1058,9 @@ func (m Model) refreshAllSources() tea.Cmd {
 }
 
 func (m Model) tickRefresh() tea.Cmd {
-	return tea.Tick(30*time.Second, func(time.Time) tea.Msg {
+	// Tick every 5 seconds for responsive top stories refresh
+	// The actual refresh interval is controlled by TopStoriesNeedsRefresh()
+	return tea.Tick(5*time.Second, func(time.Time) tea.Msg {
 		return TickMsg{}
 	})
 }
