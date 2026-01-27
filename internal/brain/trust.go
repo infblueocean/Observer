@@ -194,7 +194,19 @@ func (a *Analyzer) analyzeInternal(ctx context.Context, item feeds.Item, topStor
 
 	// Need at least one provider
 	if localProvider == nil && cloudProvider == nil {
-		logging.Debug("AI analysis skipped - no provider available")
+		logging.Warn("AI analysis failed - no provider available")
+		analysis := Analysis{
+			Error:    fmt.Errorf("no AI provider configured - add API keys in config (press 'c')"),
+			Loading:  false,
+			Provider: "none",
+			Stage:    "error",
+		}
+		a.mu.Lock()
+		a.analyses[item.ID] = &analysis
+		a.mu.Unlock()
+		for _, cb := range callbacks {
+			cb(item.ID, analysis)
+		}
 		return
 	}
 
@@ -267,6 +279,22 @@ RULES:
 	// If cloud is available, use it directly
 	if cloudProvider != nil {
 		go func() {
+			// Recover from panics to prevent silent failures
+			defer func() {
+				if r := recover(); r != nil {
+					logging.Error("Cloud analysis goroutine panicked", "error", r, "item", item.ID)
+					analysis := Analysis{
+						Error:    fmt.Errorf("analysis failed: %v", r),
+						Loading:  false,
+						Provider: cloudProvider.Name(),
+						Stage:    "error",
+					}
+					a.mu.Lock()
+					a.analyses[item.ID] = &analysis
+					a.mu.Unlock()
+				}
+			}()
+
 			a.mu.Lock()
 			if existing, ok := a.analyses[item.ID]; ok {
 				existing.Stage = "analyzing"
@@ -286,6 +314,22 @@ RULES:
 	} else if localProvider != nil {
 		// Two-stage local analysis: instruct model → transcript model
 		go func() {
+			// Recover from panics to prevent silent failures
+			defer func() {
+				if r := recover(); r != nil {
+					logging.Error("Local analysis goroutine panicked", "error", r, "item", item.ID)
+					analysis := Analysis{
+						Error:    fmt.Errorf("analysis failed: %v", r),
+						Loading:  false,
+						Provider: "ollama",
+						Stage:    "error",
+					}
+					a.mu.Lock()
+					a.analyses[item.ID] = &analysis
+					a.mu.Unlock()
+				}
+			}()
+
 			a.mu.Lock()
 			if existing, ok := a.analyses[item.ID]; ok {
 				existing.Stage = "analyzing"
@@ -486,10 +530,24 @@ func (a *Analyzer) AnalyzeRandomProvider(ctx context.Context, item feeds.Item, t
 
 	// Get a random CLOUD provider (excludes Ollama for better quality on 'a' key)
 	provider := a.getCloudProvider()
+	callbacks := a.callbacks
 	a.mu.RUnlock()
 
 	if provider == nil {
-		logging.Debug("AI analysis skipped - no provider available")
+		logging.Warn("AI analysis failed - no cloud provider available")
+		// Set error state so UI knows analysis failed
+		analysis := Analysis{
+			Error:    fmt.Errorf("no cloud provider configured - add API keys in config (press 'c')"),
+			Loading:  false,
+			Provider: "none",
+			Stage:    "error",
+		}
+		a.mu.Lock()
+		a.analyses[item.ID] = &analysis
+		a.mu.Unlock()
+		for _, cb := range callbacks {
+			cb(item.ID, analysis)
+		}
 		return
 	}
 
@@ -553,6 +611,22 @@ RULES:
 
 	// Run analysis in goroutine
 	go func() {
+		// Recover from panics to prevent silent failures
+		defer func() {
+			if r := recover(); r != nil {
+				logging.Error("Analysis goroutine panicked", "error", r, "item", item.ID)
+				analysis := Analysis{
+					Error:    fmt.Errorf("analysis failed: %v", r),
+					Loading:  false,
+					Provider: providerName,
+					Stage:    "error",
+				}
+				a.mu.Lock()
+				a.analyses[item.ID] = &analysis
+				a.mu.Unlock()
+			}
+		}()
+
 		a.mu.Lock()
 		if existing, ok := a.analyses[item.ID]; ok {
 			existing.Stage = "analyzing"
