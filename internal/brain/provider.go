@@ -31,6 +31,23 @@ type Response struct {
 	Error       error
 }
 
+// StreamChunk is an incremental piece of a streaming response
+type StreamChunk struct {
+	Content string // Incremental content (append to previous)
+	Done    bool   // True when stream is complete
+	Error   error  // Non-nil if stream encountered an error
+	Model   string // Model name (set on first/last chunk)
+}
+
+// StreamingProvider extends Provider with streaming support
+type StreamingProvider interface {
+	Provider
+	// GenerateStream returns a channel that yields content chunks
+	// The channel is closed when generation is complete
+	// Callers should check chunk.Done and chunk.Error
+	GenerateStream(ctx context.Context, req Request) (<-chan StreamChunk, error)
+}
+
 // ProviderManager manages multiple AI providers with fallback
 type ProviderManager struct {
 	providers []Provider

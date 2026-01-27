@@ -74,11 +74,36 @@ func (m *Model) SetAnalysis(itemID string, itemTitle string, analysis *brain.Ana
 	m.scrollPos = 0 // Reset scroll when content changes
 
 	// Calculate total lines for scroll limits
-	if analysis != nil && analysis.Content != "" {
-		wrapped := wrapText(analysis.Content, m.width-10)
+	m.recalculateTotalLines()
+}
+
+// recalculateTotalLines updates totalLines based on current content
+func (m *Model) recalculateTotalLines() {
+	if m.analysis != nil && m.analysis.Content != "" {
+		wrapped := wrapText(m.analysis.Content, m.width-10)
 		m.totalLines = len(strings.Split(wrapped, "\n"))
 	} else {
 		m.totalLines = 0
+	}
+}
+
+// AppendStreamContent appends incremental content during streaming
+func (m *Model) AppendStreamContent(content string) {
+	if m.analysis == nil {
+		m.analysis = &brain.Analysis{Loading: true}
+	}
+	m.analysis.Content += content
+	// Recalculate lines for scroll limits
+	m.recalculateTotalLines()
+}
+
+// SetStreamComplete marks streaming as complete
+func (m *Model) SetStreamComplete(model string) {
+	if m.analysis != nil {
+		m.analysis.Loading = false
+		if model != "" {
+			m.analysis.Pipeline = []string{model}
+		}
 	}
 }
 

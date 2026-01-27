@@ -1,6 +1,7 @@
 package brain
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -313,4 +314,118 @@ func (o *OllamaProvider) GetTranscriptModel() string {
 		}
 	}
 	return ""
+}
+
+// GenerateStream implements StreamingProvider for real-time token streaming
+func (o *OllamaProvider) GenerateStream(ctx context.Context, req Request) (<-chan StreamChunk, error) {
+	model := o.getModel()
+	if model == "" {
+		return nil, fmt.Errorf("ollama not available at %s (no models)", o.endpoint)
+	}
+
+	logging.Debug("Ollama streaming request starting", "model", model, "endpoint", o.endpoint)
+
+	// Build the request body with streaming enabled
+	messages := []map[string]string{
+		{"role": "user", "content": req.UserPrompt},
+	}
+
+	body := map[string]interface{}{
+		"model":    model,
+		"messages": messages,
+		"stream":   true, // Enable streaming
+	}
+
+	if req.SystemPrompt != "" {
+		body["system"] = req.SystemPrompt
+	}
+
+	if req.MaxTokens > 0 {
+		body["options"] = map[string]interface{}{
+			"num_predict": req.MaxTokens,
+		}
+	}
+
+	jsonBody, err := json.Marshal(body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", o.endpoint+"/api/chat", bytes.NewReader(jsonBody))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	// Use a client without timeout for streaming (context handles cancellation)
+	client := &http.Client{}
+	resp, err := client.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("request failed: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		return nil, fmt.Errorf("API error (status %d): %s", resp.StatusCode, string(body))
+	}
+
+	// Create channel for streaming chunks
+	chunks := make(chan StreamChunk, 10)
+
+	// Start goroutine to read streaming response
+	go func() {
+		defer close(chunks)
+		defer resp.Body.Close()
+
+		scanner := bufio.NewScanner(resp.Body)
+		// Increase buffer size for potentially large chunks
+		scanner.Buffer(make([]byte, 64*1024), 1024*1024)
+
+		for scanner.Scan() {
+			select {
+			case <-ctx.Done():
+				chunks <- StreamChunk{Error: ctx.Err(), Done: true}
+				return
+			default:
+			}
+
+			line := scanner.Bytes()
+			if len(line) == 0 {
+				continue
+			}
+
+			var chunk struct {
+				Model   string `json:"model"`
+				Message struct {
+					Content string `json:"content"`
+				} `json:"message"`
+				Done bool `json:"done"`
+			}
+
+			if err := json.Unmarshal(line, &chunk); err != nil {
+				logging.Debug("Ollama stream parse error", "error", err, "line", string(line))
+				continue
+			}
+
+			// Send the chunk
+			chunks <- StreamChunk{
+				Content: chunk.Message.Content,
+				Done:    chunk.Done,
+				Model:   chunk.Model,
+			}
+
+			if chunk.Done {
+				logging.Debug("Ollama stream complete", "model", chunk.Model)
+				return
+			}
+		}
+
+		if err := scanner.Err(); err != nil {
+			chunks <- StreamChunk{Error: err, Done: true}
+		}
+	}()
+
+	return chunks, nil
 }

@@ -28,6 +28,22 @@ type BrainTrustAnalysisMsg struct {
 	Analysis  brain.Analysis
 }
 
+// BrainTrustStreamChunkMsg is sent for each chunk during streaming analysis
+type BrainTrustStreamChunkMsg struct {
+	ItemID  string
+	Content string // Incremental content to append
+	Done    bool   // True when stream is complete
+	Model   string // Model name
+	Error   error
+}
+
+// BrainTrustStreamStartMsg is sent when streaming begins, carries the channel
+type BrainTrustStreamStartMsg struct {
+	ItemID    string
+	ItemTitle string
+	Chunks    <-chan brain.StreamChunk
+}
+
 // TopStoriesMsg is sent when AI top stories analysis completes
 type TopStoriesMsg struct {
 	Stories []brain.TopStoryResult

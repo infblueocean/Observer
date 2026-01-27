@@ -92,6 +92,10 @@ type Model struct {
 	mouseOverAnalysis  bool // True when mouse is hovering over analysis pane
 	analysisFocused    bool // True when analysis pane has keyboard focus (scroll goes to analysis)
 
+	// Streaming analysis state
+	activeStreamItemID string                   // Item ID for active stream
+	activeStreamChan   <-chan brain.StreamChunk // Active streaming channel
+
 	// Session tracking
 	sessionID         int64     // Current session ID for tracking
 	lastSessionTime   time.Time // When user was last active
@@ -516,6 +520,51 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case BrainTrustStreamStartMsg:
+		// Stream has started - store the channel and begin reading
+		m.activeStreamItemID = msg.ItemID
+		m.activeStreamChan = msg.Chunks
+		logging.Debug("Streaming analysis started", "item", msg.ItemID)
+
+		// Start reading chunks
+		return m, readNextStreamChunk(msg.ItemID, msg.Chunks)
+
+	case BrainTrustStreamChunkMsg:
+		// Handle streaming analysis chunks
+		if m.brainTrustPanel.GetItemID() != msg.ItemID {
+			// Stream is for a different item, ignore
+			return m, nil
+		}
+
+		if msg.Error != nil {
+			// Stream error - show it in the panel
+			logging.Error("Streaming analysis error", "error", msg.Error, "item", msg.ItemID)
+			m.brainTrustPanel.SetStreamComplete(msg.Model)
+			m.activeStreamItemID = ""
+			m.activeStreamChan = nil
+			return m, nil
+		}
+
+		// Append content to the panel
+		if msg.Content != "" {
+			m.brainTrustPanel.AppendStreamContent(msg.Content)
+		}
+
+		if msg.Done {
+			// Stream complete
+			m.brainTrustPanel.SetStreamComplete(msg.Model)
+			m.activeStreamItemID = ""
+			m.activeStreamChan = nil
+			logging.Debug("Streaming analysis complete", "item", msg.ItemID, "model", msg.Model)
+			return m, nil
+		}
+
+		// Continue reading from stream
+		if m.activeStreamChan != nil {
+			return m, readNextStreamChunk(msg.ItemID, m.activeStreamChan)
+		}
+		return m, nil
+
 	case spinner.TickMsg:
 		// Update spinner animation for AI Analysis panel and top stories
 		var cmd tea.Cmd
@@ -824,7 +873,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			)
 		}
 
-	case "A": // Shift+A for local-only analysis (LFM-instruct → LFM-transcript)
+	case "A": // Shift+A for local-only analysis with streaming (tokens appear as generated)
 		if item := m.stream.SelectedItem(); item != nil {
 			// Don't trigger if analysis already in progress
 			if m.brainTrustPanel.IsLoading() {
@@ -834,6 +883,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			m.showBrainTrust = true
+			m.analysisFocused = true // Focus shifts to analysis pane for scrolling
 			m.brainTrustPanel.Clear()
 			m.brainTrustPanel.SetVisible(true)
 			aiHeight := min(m.height/2, 20)
@@ -847,8 +897,9 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				streamHeight -= 3
 			}
 			m.stream.SetSize(m.width, streamHeight)
+			// Use streaming for local analysis - tokens appear as they're generated
 			return m, tea.Batch(
-				m.analyzeBrainTrustLocal(*item),
+				m.analyzeBrainTrustStreaming(*item),
 				m.brainTrustPanel.Spinner().Tick,
 			)
 		}
@@ -1605,6 +1656,70 @@ func (m Model) analyzeBrainTrustLocal(item feeds.Item) tea.Cmd {
 					Analysis:  brain.Analysis{Error: fmt.Errorf("local analysis timed out")},
 				}
 			}
+		}
+	}
+}
+
+// analyzeBrainTrustStreaming triggers streaming analysis using local Ollama
+// Tokens are displayed as they arrive for better UX during long generations
+func (m Model) analyzeBrainTrustStreaming(item feeds.Item) tea.Cmd {
+	topStoriesContext := m.brainTrust.GetTopStoriesContext()
+
+	return func() tea.Msg {
+		// Check if we have a streaming provider
+		streamingProvider := m.brainTrust.GetStreamingProvider()
+		if streamingProvider == nil {
+			// Fall back to non-streaming
+			logging.Debug("No streaming provider available, using non-streaming")
+			return m.analyzeBrainTrustLocal(item)()
+		}
+
+		// Build the analysis prompt
+		systemPrompt, userPrompt := m.brainTrust.BuildAnalysisPrompt(item, topStoriesContext)
+
+		ctx := context.Background()
+		chunks, err := streamingProvider.GenerateStream(ctx, brain.Request{
+			SystemPrompt: systemPrompt,
+			UserPrompt:   userPrompt,
+			MaxTokens:    1000,
+		})
+		if err != nil {
+			logging.Error("Failed to start streaming analysis", "error", err)
+			return BrainTrustAnalysisMsg{
+				ItemID:    item.ID,
+				ItemTitle: item.Title,
+				Analysis:  brain.Analysis{Error: err},
+			}
+		}
+
+		// Return the stream start message with the channel
+		// The Update handler will store it and start reading
+		return BrainTrustStreamStartMsg{
+			ItemID:    item.ID,
+			ItemTitle: item.Title,
+			Chunks:    chunks,
+		}
+	}
+}
+
+// readNextStreamChunk creates a command to read the next chunk from a stream
+func readNextStreamChunk(itemID string, chunks <-chan brain.StreamChunk) tea.Cmd {
+	return func() tea.Msg {
+		chunk, ok := <-chunks
+		if !ok {
+			// Channel closed, stream complete
+			return BrainTrustStreamChunkMsg{
+				ItemID: itemID,
+				Done:   true,
+			}
+		}
+
+		return BrainTrustStreamChunkMsg{
+			ItemID:  itemID,
+			Content: chunk.Content,
+			Done:    chunk.Done,
+			Model:   chunk.Model,
+			Error:   chunk.Error,
 		}
 	}
 }

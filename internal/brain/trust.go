@@ -1736,6 +1736,74 @@ func mapLabel(label string) string {
 	}
 }
 
+// GetStreamingProvider returns a provider that supports streaming, or nil if none available
+// Prefers local Ollama provider for streaming
+func (a *Analyzer) GetStreamingProvider() StreamingProvider {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+
+	for _, p := range a.providers {
+		if p != nil && p.Name() == "ollama" && p.Available() {
+			if sp, ok := p.(StreamingProvider); ok {
+				return sp
+			}
+		}
+	}
+	return nil
+}
+
+// BuildAnalysisPrompt builds the system and user prompts for analysis
+// This extracts the prompt logic so it can be reused by streaming
+func (a *Analyzer) BuildAnalysisPrompt(item feeds.Item, topStoriesContext string) (systemPrompt, userPrompt string) {
+	// Build the item summary
+	itemSummary := fmt.Sprintf("Title: %s\n", item.Title)
+	if item.Summary != "" {
+		itemSummary += fmt.Sprintf("Summary: %s\n", item.Summary)
+	}
+	if item.SourceName != "" {
+		itemSummary += fmt.Sprintf("Source: %s\n", item.SourceName)
+	}
+	if item.URL != "" {
+		itemSummary += fmt.Sprintf("URL: %s\n", item.URL)
+	}
+
+	hasTopStories := topStoriesContext != ""
+
+	if hasTopStories {
+		systemPrompt = `You are a seasoned news analyst in the tradition of Dan Rather, Walter Cronkite, or Christiane Amanpour. Analyze this news with the gravitas and insight of a veteran journalist who has seen history unfold.
+
+Write 2-3 paragraphs covering:
+- What this means and why it matters to ordinary people
+- Relevant historical parallels or precedents
+- Key questions that remain unanswered
+
+Then write 1 paragraph on how it connects to the current top stories.
+
+RULES:
+- Write in third person only. NEVER use "I", "my", "I've witnessed", "in my career", etc.
+- Start directly with analysis. No preamble like "Certainly" or "Here's my analysis".
+- Plain text only. No markdown, no headers, no bullet points.
+- Be direct, authoritative, and occasionally wry.`
+		userPrompt = fmt.Sprintf("Analyze this news item:\n\n%s\n%s", itemSummary, topStoriesContext)
+	} else {
+		systemPrompt = `You are a seasoned news analyst in the tradition of Dan Rather, Walter Cronkite, or Christiane Amanpour. Analyze this news with the gravitas and insight of a veteran journalist who has seen history unfold.
+
+Write 2-3 paragraphs covering:
+- What this means and why it matters to ordinary people
+- Relevant historical parallels or precedents
+- Key questions that remain unanswered
+
+RULES:
+- Write in third person only. NEVER use "I", "my", "I've witnessed", "in my career", etc.
+- Start directly with analysis. No preamble like "Certainly" or "Here's my analysis".
+- Plain text only. No markdown, no headers, no bullet points.
+- Be direct, authoritative, and occasionally wry.`
+		userPrompt = fmt.Sprintf("Analyze this news item:\n\n%s", itemSummary)
+	}
+
+	return systemPrompt, userPrompt
+}
+
 // Legacy alias for compatibility
 type BrainTrust = Analyzer
 
