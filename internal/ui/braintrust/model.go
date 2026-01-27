@@ -129,7 +129,16 @@ func (m *Model) ScrollUp(lines int) {
 // ScrollDown scrolls the content down (shows later content)
 func (m *Model) ScrollDown(lines int) {
 	m.scrollPos += lines
-	maxScroll := m.totalLines - (m.height - 5) // Leave room for header/footer
+	// Calculate max scroll: total lines minus visible area
+	// height - 5 = visible content lines (minus header, title, divider, padding)
+	// But when scrolled down, the "scroll up" indicator takes 1 line, so we need +1
+	visibleLines := m.height - 5
+	if visibleLines < 3 {
+		visibleLines = 3
+	}
+	// When scrolled (scrollPos > 0), the "scroll up" indicator takes 1 line
+	// So we can scroll further to see all content
+	maxScroll := m.totalLines - visibleLines + 1
 	if maxScroll < 0 {
 		maxScroll = 0
 	}
@@ -259,41 +268,56 @@ func (m Model) View() string {
 		wrapped := wrapText(m.analysis.Content, m.width-10)
 		allLines := strings.Split(wrapped, "\n")
 
-		// Calculate visible lines (leave room for header/divider)
-		maxLines := m.height - 5
-		if maxLines < 3 {
-			maxLines = 3
+		// Calculate available lines for content (leave room for header/divider)
+		availableLines := m.height - 5
+		if availableLines < 3 {
+			availableLines = 3
 		}
 
-		// Apply scroll offset
+		// Determine if we need scroll indicators
 		startLine := m.scrollPos
 		if startLine >= len(allLines) {
 			startLine = max(0, len(allLines)-1)
 		}
-		endLine := startLine + maxLines
+
+		needScrollUp := startLine > 0
+		needScrollDown := startLine+availableLines < len(allLines)
+
+		// Adjust content lines to make room for indicators
+		contentLines := availableLines
+		if needScrollUp {
+			contentLines--
+		}
+		if needScrollDown {
+			contentLines--
+		}
+		if contentLines < 1 {
+			contentLines = 1
+		}
+
+		// Get the visible content slice
+		endLine := startLine + contentLines
 		if endLine > len(allLines) {
 			endLine = len(allLines)
 		}
-
 		visibleLines := allLines[startLine:endLine]
 
-		// Add scroll indicators
-		if startLine > 0 {
+		// Build output with scroll indicators
+		var outputLines []string
+
+		if needScrollUp {
 			scrollUpStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#58a6ff"))
-			visibleLines = append([]string{scrollUpStyle.Render("▲ scroll up for more")}, visibleLines...)
-			if len(visibleLines) > maxLines {
-				visibleLines = visibleLines[:maxLines]
-			}
-		}
-		if endLine < len(allLines) {
-			scrollDownStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#58a6ff"))
-			if len(visibleLines) >= maxLines {
-				visibleLines = visibleLines[:maxLines-1]
-			}
-			visibleLines = append(visibleLines, scrollDownStyle.Render("▼ scroll down for more"))
+			outputLines = append(outputLines, scrollUpStyle.Render("▲ scroll up for more"))
 		}
 
-		content = contentStyle.Render(strings.Join(visibleLines, "\n"))
+		outputLines = append(outputLines, visibleLines...)
+
+		if needScrollDown {
+			scrollDownStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#58a6ff"))
+			outputLines = append(outputLines, scrollDownStyle.Render("▼ scroll down for more"))
+		}
+
+		content = contentStyle.Render(strings.Join(outputLines, "\n"))
 	}
 
 	var body string

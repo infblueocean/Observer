@@ -306,7 +306,7 @@ RULES:
 			resp, err := cloudProvider.Generate(ctx, Request{
 				SystemPrompt: systemPrompt,
 				UserPrompt:   userPrompt,
-				MaxTokens:    800,
+				MaxTokens:    1500,
 			})
 
 			// Just show the actual model used
@@ -345,7 +345,7 @@ RULES:
 			resp, err := localProvider.Generate(ctx, Request{
 				SystemPrompt: systemPrompt,
 				UserPrompt:   userPrompt,
-				MaxTokens:    600,
+				MaxTokens:    1000,
 			})
 
 			// Just show the model used
@@ -640,7 +640,7 @@ RULES:
 		resp, err := provider.Generate(ctx, Request{
 			SystemPrompt: systemPrompt,
 			UserPrompt:   userPrompt,
-			MaxTokens:    800,
+			MaxTokens:    1500,
 		})
 
 		pipeline := []string{resp.Model}

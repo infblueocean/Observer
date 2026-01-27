@@ -51,7 +51,7 @@ func (o *OpenAIProvider) Generate(ctx context.Context, req Request) (Response, e
 
 	maxTokens := req.MaxTokens
 	if maxTokens == 0 {
-		maxTokens = 256
+		maxTokens = 2048 // Reasonable default for analysis tasks
 	}
 
 	// Build messages array
@@ -107,6 +107,7 @@ func (o *OpenAIProvider) Generate(ctx context.Context, req Request) (Response, e
 			Message struct {
 				Content string `json:"content"`
 			} `json:"message"`
+			FinishReason string `json:"finish_reason"`
 		} `json:"choices"`
 		Model string `json:"model"`
 	}
@@ -116,13 +117,24 @@ func (o *OpenAIProvider) Generate(ctx context.Context, req Request) (Response, e
 	}
 
 	content := ""
+	finishReason := ""
 	if len(result.Choices) > 0 {
 		content = result.Choices[0].Message.Content
+		finishReason = result.Choices[0].FinishReason
+	}
+
+	// Log warning if response was truncated
+	if finishReason == "length" {
+		logging.Warn("OpenAI response truncated due to max tokens",
+			"model", result.Model,
+			"max_tokens", maxTokens,
+			"content_length", len(content))
 	}
 
 	logging.Info("OpenAI API response",
 		"model", result.Model,
-		"content_length", len(content))
+		"content_length", len(content),
+		"finish_reason", finishReason)
 
 	return Response{
 		Content:     content,

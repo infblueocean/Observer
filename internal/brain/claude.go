@@ -59,7 +59,7 @@ func (c *ClaudeProvider) Generate(ctx context.Context, req Request) (Response, e
 
 	maxTokens := req.MaxTokens
 	if maxTokens == 0 {
-		maxTokens = 256 // Short responses for Brain Trust
+		maxTokens = 2048 // Reasonable default for analysis tasks
 	}
 
 	// Build the request body
@@ -128,6 +128,13 @@ func (c *ClaudeProvider) Generate(ctx context.Context, req Request) (Response, e
 
 	if err := json.Unmarshal(respBody, &result); err != nil {
 		return Response{}, fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	// Log warning if response was truncated
+	if result.StopReason == "max_tokens" {
+		logging.Warn("Claude response truncated due to max tokens",
+			"model", result.Model,
+			"max_tokens", maxTokens)
 	}
 
 	logging.Debug("Claude API response parsed",

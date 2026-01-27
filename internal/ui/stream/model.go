@@ -293,6 +293,7 @@ type Model struct {
 	itemBands    map[string]timeBand       // item ID -> cached time band (set at load time)
 	categories   map[string]string         // item ID -> category lookup
 	cursor       int
+	selectedID   string                    // Track selected item ID for stability during updates
 	width        int
 	height       int
 	loading      bool
@@ -375,11 +376,35 @@ func (m *Model) SetSize(width, height int) {
 
 // SetItems replaces the current items
 func (m *Model) SetItems(items []feeds.Item) {
+	// Remember currently selected item ID for stability
+	var previousSelectedID string
+	if m.cursor >= 0 && m.cursor < len(m.items) {
+		previousSelectedID = m.items[m.cursor].ID
+	}
+	if m.selectedID != "" {
+		previousSelectedID = m.selectedID
+	}
+
 	// Interleave sources within time bands for uniform sampling
 	// This prevents clusters of items from the same source
 	m.items = interleaveWithinBands(items)
 	m.loading = false
-	if m.cursor >= len(m.items) {
+
+	// Try to restore cursor to the same item (by ID) after update
+	foundPrevious := false
+	if previousSelectedID != "" {
+		for i, item := range m.items {
+			if item.ID == previousSelectedID {
+				m.cursor = i
+				m.selectedID = previousSelectedID
+				foundPrevious = true
+				break
+			}
+		}
+	}
+
+	// Item not found in new list, clamp cursor to valid range
+	if !foundPrevious && m.cursor >= len(m.items) {
 		m.cursor = max(0, len(m.items)-1)
 	}
 
@@ -640,6 +665,11 @@ func (m *Model) MoveUp() {
 	if m.cursor > 0 {
 		m.cursor--
 		m.scrollTarget = float64(m.cursor)
+		// Update selectedID for stability during feed updates
+		items := m.getFilteredItems()
+		if m.cursor >= 0 && m.cursor < len(items) {
+			m.selectedID = items[m.cursor].ID
+		}
 	}
 }
 
@@ -649,6 +679,10 @@ func (m *Model) MoveDown() {
 	if m.cursor < len(items)-1 {
 		m.cursor++
 		m.scrollTarget = float64(m.cursor)
+		// Update selectedID for stability during feed updates
+		if m.cursor >= 0 && m.cursor < len(items) {
+			m.selectedID = items[m.cursor].ID
+		}
 	}
 }
 

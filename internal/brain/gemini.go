@@ -47,12 +47,12 @@ func (g *GeminiProvider) Generate(ctx context.Context, req Request) (Response, e
 		return Response{}, fmt.Errorf("gemini provider not configured")
 	}
 
-	logging.Debug("Gemini API request starting", "model", g.model)
-
 	maxTokens := req.MaxTokens
 	if maxTokens == 0 {
-		maxTokens = 256
+		maxTokens = 2048 // Reasonable default for analysis tasks
 	}
+
+	logging.Debug("Gemini API request starting", "model", g.model, "max_tokens", maxTokens)
 
 	// Build the request body for Gemini API
 	// Gemini uses a different format than OpenAI
@@ -125,6 +125,7 @@ func (g *GeminiProvider) Generate(ctx context.Context, req Request) (Response, e
 					Text string `json:"text"`
 				} `json:"parts"`
 			} `json:"content"`
+			FinishReason string `json:"finishReason"`
 		} `json:"candidates"`
 		ModelVersion string `json:"modelVersion"`
 	}
@@ -134,8 +135,12 @@ func (g *GeminiProvider) Generate(ctx context.Context, req Request) (Response, e
 	}
 
 	content := ""
-	if len(result.Candidates) > 0 && len(result.Candidates[0].Content.Parts) > 0 {
-		content = result.Candidates[0].Content.Parts[0].Text
+	finishReason := ""
+	if len(result.Candidates) > 0 {
+		if len(result.Candidates[0].Content.Parts) > 0 {
+			content = result.Candidates[0].Content.Parts[0].Text
+		}
+		finishReason = result.Candidates[0].FinishReason
 	}
 
 	modelName := g.model
@@ -143,9 +148,18 @@ func (g *GeminiProvider) Generate(ctx context.Context, req Request) (Response, e
 		modelName = result.ModelVersion
 	}
 
+	// Log warning if response was truncated
+	if finishReason == "MAX_TOKENS" {
+		logging.Warn("Gemini response truncated due to max tokens",
+			"model", modelName,
+			"max_tokens", maxTokens,
+			"content_length", len(content))
+	}
+
 	logging.Info("Gemini API response",
 		"model", modelName,
-		"content_length", len(content))
+		"content_length", len(content),
+		"finish_reason", finishReason)
 
 	return Response{
 		Content:     content,

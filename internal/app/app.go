@@ -90,6 +90,7 @@ type Model struct {
 	analysisPaneTop    int  // Y coordinate where analysis pane starts
 	analysisPaneBottom int  // Y coordinate where analysis pane ends
 	mouseOverAnalysis  bool // True when mouse is hovering over analysis pane
+	analysisFocused    bool // True when analysis pane has keyboard focus (scroll goes to analysis)
 
 	// Session tracking
 	sessionID         int64     // Current session ID for tracking
@@ -659,10 +660,14 @@ func (m *Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	}
 
 	// Check if mouse is over the analysis pane
-	if m.showBrainTrust && msg.Y >= m.analysisPaneTop && msg.Y <= m.analysisPaneBottom {
-		m.mouseOverAnalysis = true
+	mouseInPane := m.showBrainTrust && msg.Y >= m.analysisPaneTop && msg.Y <= m.analysisPaneBottom
+	m.mouseOverAnalysis = mouseInPane
 
-		// Handle scroll wheel events
+	// Scroll goes to analysis pane if: mouse is over it OR analysis has keyboard focus
+	scrollToAnalysis := m.showBrainTrust && (mouseInPane || m.analysisFocused)
+
+	if scrollToAnalysis {
+		// Handle scroll wheel events for analysis pane
 		switch msg.Button {
 		case tea.MouseButtonWheelUp:
 			m.brainTrustPanel.ScrollUp(3)
@@ -672,16 +677,16 @@ func (m *Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 	} else {
-		m.mouseOverAnalysis = false
-
 		// Scroll wheel over main content area scrolls the feed (one item at a time)
 		switch msg.Button {
 		case tea.MouseButtonWheelUp:
 			m.stream.MoveUp()
+			m.analysisFocused = false // Scrolling feed clears analysis focus
 			m.updateBrainTrustForSelectedItem()
 			return m, nil
 		case tea.MouseButtonWheelDown:
 			m.stream.MoveDown()
+			m.analysisFocused = false // Scrolling feed clears analysis focus
 			m.updateBrainTrustForSelectedItem()
 			return m, nil
 		}
@@ -698,18 +703,28 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 
 	case "esc", "backspace":
-		// Clear any active filter
+		// Clear analysis focus first, then filter, then hide panel
+		if m.analysisFocused {
+			m.analysisFocused = false
+			return m, nil
+		}
 		if m.stream.HasFilter() {
 			m.stream.ClearFilter()
+			return m, nil
+		}
+		if m.showBrainTrust {
+			m.showBrainTrust = false
 			return m, nil
 		}
 
 	case "up", "k":
 		m.stream.MoveUp()
+		m.analysisFocused = false // Return focus to feed when navigating
 		m.updateBrainTrustForSelectedItem()
 
 	case "down", "j":
 		m.stream.MoveDown()
+		m.analysisFocused = false // Return focus to feed when navigating
 		m.updateBrainTrustForSelectedItem()
 
 	case "enter":
@@ -786,6 +801,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 
 			m.showBrainTrust = true
+			m.analysisFocused = true // Focus shifts to analysis pane for scrolling
 			m.brainTrustPanel.Clear() // Clear any previous display (but keeps DB history)
 			m.brainTrustPanel.SetVisible(true)
 			// AI panel gets max 33% of screen
@@ -838,9 +854,13 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 
 	case "tab":
-		// Toggle AI Analysis panel visibility
-		m.showBrainTrust = !m.showBrainTrust
+		// Toggle AI Analysis panel visibility OR toggle focus when panel is visible
 		if m.showBrainTrust {
+			// Panel is visible - toggle focus between feed and analysis
+			m.analysisFocused = !m.analysisFocused
+		} else {
+			// Panel is hidden - show it
+			m.showBrainTrust = true
 			// Update panel size (max 33% of screen)
 			aiHeight := min(m.height/2, 20)
 			if aiHeight < 6 {
