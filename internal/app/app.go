@@ -93,8 +93,10 @@ type Model struct {
 	analysisFocused    bool // True when analysis pane has keyboard focus (scroll goes to analysis)
 
 	// Streaming analysis state
-	activeStreamItemID string                   // Item ID for active stream
-	activeStreamChan   <-chan brain.StreamChunk // Active streaming channel
+	activeStreamItemID   string                   // Item ID for active stream
+	activeStreamChan     <-chan brain.StreamChunk // Active streaming channel
+	streamBuffer         *strings.Builder         // Buffer for accumulating chunks (pointer to avoid copy issues)
+	lastStreamRenderTime time.Time                // When we last rendered stream content
 
 	// Session tracking
 	sessionID         int64     // Current session ID for tracking
@@ -346,6 +348,7 @@ func New() Model {
 		sessionID:           sessionID,
 		lastSessionTime:     lastSessionTime,
 		showBriefingOnStart: showBriefingOnStart,
+		streamBuffer:        &strings.Builder{},
 	}
 }
 
@@ -524,7 +527,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Stream has started - store the channel and begin reading
 		m.activeStreamItemID = msg.ItemID
 		m.activeStreamChan = msg.Chunks
-		logging.Debug("Streaming analysis started", "item", msg.ItemID)
+		m.streamBuffer.Reset()
+		m.lastStreamRenderTime = time.Now()
+		logging.Info("STREAMING: Stream started, beginning to read chunks",
+			"item", msg.ItemID, "provider", msg.ProviderName)
+
+		// Don't set provider name here - wait for real model ID from first chunk
 
 		// Start reading chunks
 		return m, readNextStreamChunk(msg.ItemID, msg.Chunks)
@@ -532,36 +540,84 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case BrainTrustStreamChunkMsg:
 		// Handle streaming analysis chunks
 		if m.brainTrustPanel.GetItemID() != msg.ItemID {
-			// Stream is for a different item, ignore
+			logging.Debug("STREAMING: Ignoring chunk for different item")
 			return m, nil
 		}
 
 		if msg.Error != nil {
-			// Stream error - show it in the panel
-			logging.Error("Streaming analysis error", "error", msg.Error, "item", msg.ItemID)
+			logging.Error("STREAMING: Stream error", "error", msg.Error, "item", msg.ItemID)
 			m.brainTrustPanel.SetStreamComplete(msg.Model)
 			m.activeStreamItemID = ""
 			m.activeStreamChan = nil
+			m.streamBuffer.Reset()
 			return m, nil
 		}
 
-		// Append content to the panel
+		// Update model name from chunk if we have it (this is the real model ID)
+		if msg.Model != "" {
+			m.brainTrustPanel.SetStreamingProvider(msg.Model)
+		}
+
+		// Buffer the content
 		if msg.Content != "" {
-			m.brainTrustPanel.AppendStreamContent(msg.Content)
+			m.streamBuffer.WriteString(msg.Content)
 		}
 
 		if msg.Done {
-			// Stream complete
+			// Flush any remaining buffer
+			logging.Info("STREAMING: Done signal received",
+				"buffer_len", m.streamBuffer.Len(),
+				"time", time.Now().Format("15:04:05.000"))
+			if m.streamBuffer.Len() > 0 {
+				m.brainTrustPanel.AppendStreamContent(m.streamBuffer.String())
+				m.streamBuffer.Reset()
+			}
 			m.brainTrustPanel.SetStreamComplete(msg.Model)
 			m.activeStreamItemID = ""
 			m.activeStreamChan = nil
-			logging.Debug("Streaming analysis complete", "item", msg.ItemID, "model", msg.Model)
 			return m, nil
 		}
 
-		// Continue reading from stream
+		// Adaptive flush interval - fast at start, slower as content grows
+		// This keeps initial UX snappy while reducing "blippiness" later
+		tokenCount := m.brainTrustPanel.GetTokenCount()
+		var flushInterval time.Duration
+		switch {
+		case tokenCount < 50:
+			flushInterval = 60 * time.Millisecond // Fast initial updates
+		case tokenCount < 150:
+			flushInterval = 150 * time.Millisecond
+		case tokenCount < 300:
+			flushInterval = 300 * time.Millisecond
+		default:
+			flushInterval = 500 * time.Millisecond // Calm updates for long content
+		}
+
+		now := time.Now()
+		sinceLastRender := now.Sub(m.lastStreamRenderTime)
+		if sinceLastRender >= flushInterval && m.streamBuffer.Len() > 0 {
+			m.brainTrustPanel.AppendStreamContent(m.streamBuffer.String())
+			m.streamBuffer.Reset()
+			m.lastStreamRenderTime = now
+
+			// Return a tick to force re-render, then continue reading
+			if m.activeStreamChan != nil {
+				return m, tea.Tick(time.Millisecond, func(t time.Time) tea.Msg {
+					return streamTickMsg{itemID: msg.ItemID}
+				})
+			}
+		}
+
+		// Continue reading chunks without forcing render
 		if m.activeStreamChan != nil {
 			return m, readNextStreamChunk(msg.ItemID, m.activeStreamChan)
+		}
+		return m, nil
+
+	case streamTickMsg:
+		// After forced render tick, continue reading stream
+		if m.activeStreamChan != nil && m.activeStreamItemID == msg.itemID {
+			return m, readNextStreamChunk(msg.itemID, m.activeStreamChan)
 		}
 		return m, nil
 
@@ -1664,6 +1720,7 @@ func (m Model) analyzeBrainTrustLocal(item feeds.Item) tea.Cmd {
 // Tokens are displayed as they arrive for better UX during long generations
 func (m Model) analyzeBrainTrustStreaming(item feeds.Item) tea.Cmd {
 	topStoriesContext := m.brainTrust.GetTopStoriesContext()
+	startTime := time.Now()
 
 	return func() tea.Msg {
 		// Check if we have a streaming provider
@@ -1674,17 +1731,24 @@ func (m Model) analyzeBrainTrustStreaming(item feeds.Item) tea.Cmd {
 			return m.analyzeBrainTrustLocal(item)()
 		}
 
+		logging.Info("STREAMING: Using provider",
+			"provider", streamingProvider.Name(),
+			"elapsed_since_keypress_ms", time.Since(startTime).Milliseconds())
+
 		// Build the analysis prompt
 		systemPrompt, userPrompt := m.brainTrust.BuildAnalysisPrompt(item, topStoriesContext)
 
 		ctx := context.Background()
+		logging.Info("STREAMING: Calling GenerateStream", "provider", streamingProvider.Name())
+
 		chunks, err := streamingProvider.GenerateStream(ctx, brain.Request{
 			SystemPrompt: systemPrompt,
 			UserPrompt:   userPrompt,
 			MaxTokens:    1000,
 		})
 		if err != nil {
-			logging.Error("Failed to start streaming analysis", "error", err)
+			logging.Error("Failed to start streaming analysis", "error", err,
+				"elapsed_ms", time.Since(startTime).Milliseconds())
 			return BrainTrustAnalysisMsg{
 				ItemID:    item.ID,
 				ItemTitle: item.Title,
@@ -1692,12 +1756,16 @@ func (m Model) analyzeBrainTrustStreaming(item feeds.Item) tea.Cmd {
 			}
 		}
 
+		logging.Info("STREAMING: GenerateStream returned channel",
+			"elapsed_ms", time.Since(startTime).Milliseconds())
+
 		// Return the stream start message with the channel
 		// The Update handler will store it and start reading
 		return BrainTrustStreamStartMsg{
-			ItemID:    item.ID,
-			ItemTitle: item.Title,
-			Chunks:    chunks,
+			ItemID:       item.ID,
+			ItemTitle:    item.Title,
+			ProviderName: streamingProvider.Name(),
+			Chunks:       chunks,
 		}
 	}
 }
@@ -1712,11 +1780,12 @@ func (m Model) analyzeBrainTrustCloudStreaming(item feeds.Item) tea.Cmd {
 		streamingProvider := m.brainTrust.GetCloudStreamingProvider()
 		if streamingProvider == nil {
 			// Fall back to non-streaming random provider
-			logging.Debug("No cloud streaming provider available, using non-streaming")
+			logging.Info("STREAMING: No cloud streaming provider available, falling back to non-streaming")
 			return m.analyzeBrainTrustRandom(item)()
 		}
 
-		logging.Debug("Starting cloud streaming analysis", "provider", streamingProvider.(brain.Provider).Name())
+		providerName := streamingProvider.(brain.Provider).Name()
+		logging.Info("STREAMING: Starting cloud streaming analysis", "provider", providerName)
 
 		// Build the analysis prompt
 		systemPrompt, userPrompt := m.brainTrust.BuildAnalysisPrompt(item, topStoriesContext)
@@ -1738,19 +1807,22 @@ func (m Model) analyzeBrainTrustCloudStreaming(item feeds.Item) tea.Cmd {
 
 		// Return the stream start message with the channel
 		return BrainTrustStreamStartMsg{
-			ItemID:    item.ID,
-			ItemTitle: item.Title,
-			Chunks:    chunks,
+			ItemID:       item.ID,
+			ItemTitle:    item.Title,
+			ProviderName: providerName,
+			Chunks:       chunks,
 		}
 	}
 }
 
 // readNextStreamChunk creates a command to read the next chunk from a stream
 func readNextStreamChunk(itemID string, chunks <-chan brain.StreamChunk) tea.Cmd {
+	logging.Info("STREAMING: readNextStreamChunk called", "item", itemID)
 	return func() tea.Msg {
+		logging.Info("STREAMING: readNextStreamChunk executing, waiting on channel")
 		chunk, ok := <-chunks
+		logging.Info("STREAMING: Got from channel", "ok", ok, "len", len(chunk.Content), "done", chunk.Done)
 		if !ok {
-			// Channel closed, stream complete
 			return BrainTrustStreamChunkMsg{
 				ItemID: itemID,
 				Done:   true,

@@ -178,7 +178,7 @@ func (c *ClaudeProvider) GenerateStream(ctx context.Context, req Request) (<-cha
 		return nil, fmt.Errorf("claude provider not configured")
 	}
 
-	logging.Debug("Claude streaming request starting", "model", c.model)
+	logging.Info("STREAMING: Claude GenerateStream called", "model", c.model)
 
 	maxTokens := req.MaxTokens
 	if maxTokens == 0 {
@@ -278,8 +278,10 @@ func (c *ClaudeProvider) GenerateStream(ctx context.Context, req Request) (<-cha
 				switch event.Type {
 				case "message_start":
 					modelName = event.Message.Model
+					logging.Debug("STREAMING: Claude message_start", "model", modelName)
 				case "content_block_delta":
 					if event.Delta.Text != "" {
+						logging.Debug("STREAMING: Claude sending chunk", "len", len(event.Delta.Text))
 						chunks <- StreamChunk{
 							Content: event.Delta.Text,
 							Model:   modelName,
@@ -287,6 +289,7 @@ func (c *ClaudeProvider) GenerateStream(ctx context.Context, req Request) (<-cha
 					}
 				case "message_delta":
 					if event.Delta.StopReason != "" {
+						logging.Debug("STREAMING: Claude message_delta done", "reason", event.Delta.StopReason)
 						chunks <- StreamChunk{
 							Done:  true,
 							Model: modelName,
@@ -294,6 +297,7 @@ func (c *ClaudeProvider) GenerateStream(ctx context.Context, req Request) (<-cha
 						return
 					}
 				case "message_stop":
+					logging.Debug("STREAMING: Claude message_stop")
 					chunks <- StreamChunk{
 						Done:  true,
 						Model: modelName,

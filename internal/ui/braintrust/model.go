@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math/rand"
 	"strings"
+	"time"
 
 	"github.com/abelbrown/observer/internal/brain"
 	"github.com/charmbracelet/bubbles/spinner"
@@ -37,6 +38,14 @@ type Model struct {
 	visible    bool
 	scrollPos  int    // Scroll position for content
 	totalLines int    // Total lines of content (for scroll limits)
+
+	// Streaming metrics
+	streamStartTime  time.Time // When streaming started
+	firstTokenTime   time.Time // When first token arrived
+	completionTime   time.Time // When streaming completed
+	tokenCount       int       // Approximate token count (words)
+	chunkCount       int       // Number of chunks received
+	hasFirstToken    bool      // Whether we've received first token
 }
 
 // New creates a new AI Analysis panel
@@ -92,18 +101,33 @@ func (m *Model) AppendStreamContent(content string) {
 	if m.analysis == nil {
 		m.analysis = &brain.Analysis{Loading: true}
 	}
+
+	// Record first token time
+	if !m.hasFirstToken && content != "" {
+		m.firstTokenTime = time.Now()
+		m.hasFirstToken = true
+	}
+
 	m.analysis.Content += content
+	m.chunkCount++
+	// Count words as approximate tokens
+	m.tokenCount = len(strings.Fields(m.analysis.Content))
+
 	// Recalculate lines for scroll limits
 	m.recalculateTotalLines()
 }
 
 // SetStreamComplete marks streaming as complete
 func (m *Model) SetStreamComplete(model string) {
+	m.completionTime = time.Now()
+
 	if m.analysis != nil {
 		m.analysis.Loading = false
 		if model != "" {
 			m.analysis.Pipeline = []string{model}
 		}
+		// Final token count
+		m.tokenCount = len(strings.Fields(m.analysis.Content))
 	}
 }
 
@@ -114,6 +138,28 @@ func (m *Model) SetLoading(itemID string, itemTitle string) {
 	m.visible = true
 	m.analysis = &brain.Analysis{Loading: true}
 	m.spinner.Spinner = randomSpinner() // Fresh spinner each time
+
+	// Reset streaming metrics
+	m.streamStartTime = time.Now()
+	m.firstTokenTime = time.Time{}
+	m.completionTime = time.Time{}
+	m.tokenCount = 0
+	m.chunkCount = 0
+	m.hasFirstToken = false
+}
+
+// SetStreamingProvider sets the provider name during streaming so it shows immediately
+// Only accepts full model IDs (containing hyphen), not short names like "claude"
+func (m *Model) SetStreamingProvider(providerName string) {
+	if m.analysis != nil && strings.Contains(providerName, "-") {
+		m.analysis.Provider = providerName
+		m.analysis.Pipeline = []string{providerName}
+	}
+}
+
+// GetTokenCount returns the current token count for adaptive streaming
+func (m Model) GetTokenCount() int {
+	return m.tokenCount
 }
 
 // SetVisible shows/hides the panel
@@ -218,7 +264,7 @@ func (m Model) View() string {
 	errorStyle := lipgloss.NewStyle().
 		Foreground(lipgloss.Color("#f85149"))
 
-	// Header with pipeline info
+	// Header with pipeline info and metrics
 	var header string
 	if m.analysis != nil && !m.analysis.Loading {
 		providerStyle := lipgloss.NewStyle().
@@ -226,6 +272,8 @@ func (m Model) View() string {
 			Italic(true)
 		pipelineStyle := lipgloss.NewStyle().
 			Foreground(lipgloss.Color("#3fb950"))
+		metricsStyle := lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#f0883e"))
 
 		// Show pipeline if available, otherwise just provider
 		if len(m.analysis.Pipeline) > 0 {
@@ -235,6 +283,61 @@ func (m Model) View() string {
 			header = titleStyle.Render("AI Analysis") + "  " + providerStyle.Render("via "+m.analysis.Provider)
 		} else {
 			header = titleStyle.Render("AI Analysis")
+		}
+
+		// Add streaming metrics
+		var metrics []string
+		if !m.streamStartTime.IsZero() && !m.firstTokenTime.IsZero() {
+			ttft := m.firstTokenTime.Sub(m.streamStartTime)
+			metrics = append(metrics, fmt.Sprintf("TTFT: %.1fs", ttft.Seconds()))
+		}
+		if !m.streamStartTime.IsZero() && !m.completionTime.IsZero() {
+			total := m.completionTime.Sub(m.streamStartTime)
+			metrics = append(metrics, fmt.Sprintf("Total: %.1fs", total.Seconds()))
+		}
+		if m.tokenCount > 0 {
+			metrics = append(metrics, fmt.Sprintf("%d tokens", m.tokenCount))
+		}
+		if m.chunkCount > 0 {
+			metrics = append(metrics, fmt.Sprintf("%d chunks", m.chunkCount))
+		}
+		if len(metrics) > 0 {
+			header += "  " + metricsStyle.Render("["+strings.Join(metrics, " | ")+"]")
+		}
+	} else if m.analysis != nil && m.analysis.Loading {
+		// Show live metrics during streaming
+		metricsStyle := lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#f0883e"))
+		pipelineStyle := lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#3fb950"))
+
+		header = titleStyle.Render("AI Analysis")
+
+		// Show provider name during streaming
+		if len(m.analysis.Pipeline) > 0 {
+			pipelineStr := strings.Join(m.analysis.Pipeline, " │ ")
+			header += "  " + pipelineStyle.Render("["+pipelineStr+"]")
+		} else if m.analysis.Provider != "" {
+			header += "  " + pipelineStyle.Render("["+m.analysis.Provider+"]")
+		}
+
+		var metrics []string
+		if !m.streamStartTime.IsZero() {
+			elapsed := time.Since(m.streamStartTime)
+			metrics = append(metrics, fmt.Sprintf("%.1fs", elapsed.Seconds()))
+		}
+		if m.hasFirstToken && !m.firstTokenTime.IsZero() {
+			ttft := m.firstTokenTime.Sub(m.streamStartTime)
+			metrics = append(metrics, fmt.Sprintf("TTFT: %.1fs", ttft.Seconds()))
+		}
+		if m.tokenCount > 0 {
+			metrics = append(metrics, fmt.Sprintf("%d tokens", m.tokenCount))
+		}
+		if m.chunkCount > 0 {
+			metrics = append(metrics, fmt.Sprintf("%d chunks", m.chunkCount))
+		}
+		if len(metrics) > 0 {
+			header += "  " + metricsStyle.Render("["+strings.Join(metrics, " | ")+"]")
 		}
 	} else {
 		header = titleStyle.Render("AI Analysis")
@@ -268,8 +371,8 @@ func (m Model) View() string {
 	var content string
 	if m.analysis == nil {
 		content = mutedStyle.Render(m.spinner.View() + " Initializing...")
-	} else if m.analysis.Loading {
-		// Show stage-specific loading message
+	} else if m.analysis.Loading && m.analysis.Content == "" {
+		// Show stage-specific loading message only when no content yet
 		stageMsg := "Analyzing..."
 		switch m.analysis.Stage {
 		case "starting":
@@ -284,6 +387,28 @@ func (m Model) View() string {
 			stageMsg = fmt.Sprintf("%s (via %s)", stageMsg, m.analysis.Provider)
 		}
 		content = mutedStyle.Render(m.spinner.View() + " " + stageMsg)
+	} else if m.analysis.Loading && m.analysis.Content != "" {
+		// STREAMING: Show content as it arrives with a cursor indicator
+		wrapped := wrapText(m.analysis.Content, m.width-10)
+		allLines := strings.Split(wrapped, "\n")
+
+		// Calculate available lines for content
+		availableLines := m.height - 5
+		if availableLines < 3 {
+			availableLines = 3
+		}
+
+		// Show the last N lines (auto-scroll to bottom during streaming)
+		startLine := 0
+		if len(allLines) > availableLines {
+			startLine = len(allLines) - availableLines
+		}
+		visibleLines := allLines[startLine:]
+
+		// Add blinking cursor at the end
+		cursorStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#58a6ff"))
+		streamingContent := strings.Join(visibleLines, "\n") + cursorStyle.Render("▌")
+		content = contentStyle.Render(streamingContent)
 	} else if m.analysis.Error != nil {
 		content = errorStyle.Render(fmt.Sprintf("Error: %v", m.analysis.Error))
 	} else if m.analysis.Content == "" {

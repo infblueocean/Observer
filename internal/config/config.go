@@ -204,12 +204,15 @@ func (c *Config) AutoPopulateFromEnv() {
 	}
 	if key := os.Getenv("OPENAI_API_KEY"); key != "" {
 		c.Models.OpenAI.APIKey = key
+		c.Models.OpenAI.Enabled = true
 	}
 	if key := os.Getenv("GOOGLE_API_KEY"); key != "" {
 		c.Models.Gemini.APIKey = key
+		c.Models.Gemini.Enabled = true
 	}
 	if key := os.Getenv("XAI_API_KEY"); key != "" {
 		c.Models.Grok.APIKey = key
+		c.Models.Grok.Enabled = true
 	}
 }
 
@@ -241,10 +244,13 @@ func (c *Config) LoadKeysFromFile(path string) error {
 			c.Models.Claude.Enabled = true
 		case "OPENAI_API_KEY":
 			c.Models.OpenAI.APIKey = value
+			c.Models.OpenAI.Enabled = true
 		case "GOOGLE_API_KEY":
 			c.Models.Gemini.APIKey = value
+			c.Models.Gemini.Enabled = true
 		case "XAI_API_KEY":
 			c.Models.Grok.APIKey = value
+			c.Models.Grok.Enabled = true
 		}
 	}
 

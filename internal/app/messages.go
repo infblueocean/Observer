@@ -39,9 +39,10 @@ type BrainTrustStreamChunkMsg struct {
 
 // BrainTrustStreamStartMsg is sent when streaming begins, carries the channel
 type BrainTrustStreamStartMsg struct {
-	ItemID    string
-	ItemTitle string
-	Chunks    <-chan brain.StreamChunk
+	ItemID       string
+	ItemTitle    string
+	ProviderName string // Name of the model/provider being used
+	Chunks       <-chan brain.StreamChunk
 }
 
 // TopStoriesMsg is sent when AI top stories analysis completes
@@ -59,3 +60,8 @@ type CorrelationProcessedMsg struct {
 
 // ShowBriefingMsg is sent on startup if user needs a briefing
 type ShowBriefingMsg struct{}
+
+// streamTickMsg is used to add a render delay between streaming chunks
+type streamTickMsg struct {
+	itemID string
+}

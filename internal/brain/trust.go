@@ -1762,20 +1762,33 @@ func (a *Analyzer) GetStreamingProvider() StreamingProvider {
 	return nil
 }
 
-// GetCloudStreamingProvider returns a cloud provider that supports streaming
+// GetCloudStreamingProvider returns a randomly selected cloud provider that supports streaming
 func (a *Analyzer) GetCloudStreamingProvider() StreamingProvider {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 
-	// Get any non-local streaming provider
+	// Collect all available cloud streaming providers
+	var cloudStreamers []StreamingProvider
 	for _, p := range a.providers {
-		if p != nil && p.Name() != "ollama" && p.Available() {
+		if p == nil {
+			continue
+		}
+		if p.Name() != "ollama" && p.Available() {
 			if sp, ok := p.(StreamingProvider); ok {
-				return sp
+				cloudStreamers = append(cloudStreamers, sp)
 			}
 		}
 	}
-	return nil
+
+	if len(cloudStreamers) == 0 {
+		logging.Warn("STREAMING: No cloud streaming provider found")
+		return nil
+	}
+
+	// Randomly select from available cloud providers
+	selected := cloudStreamers[rand.Intn(len(cloudStreamers))]
+	logging.Info("STREAMING: Randomly selected cloud provider", "name", selected.Name(), "total_available", len(cloudStreamers))
+	return selected
 }
 
 // BuildAnalysisPrompt builds the system and user prompts for analysis
