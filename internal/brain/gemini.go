@@ -1,12 +1,14 @@
 package brain
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/abelbrown/observer/internal/logging"
@@ -166,4 +168,156 @@ func (g *GeminiProvider) Generate(ctx context.Context, req Request) (Response, e
 		Model:       modelName,
 		RawResponse: string(respBody),
 	}, nil
+}
+
+// GenerateStream implements StreamingProvider for real-time token streaming
+func (g *GeminiProvider) GenerateStream(ctx context.Context, req Request) (<-chan StreamChunk, error) {
+	if !g.Available() {
+		return nil, fmt.Errorf("gemini provider not configured")
+	}
+
+	maxTokens := req.MaxTokens
+	if maxTokens == 0 {
+		maxTokens = 2048
+	}
+
+	logging.Debug("Gemini streaming request starting", "model", g.model, "max_tokens", maxTokens)
+
+	// Build the request body
+	contents := []map[string]interface{}{}
+
+	systemInstruction := map[string]interface{}{}
+	if req.SystemPrompt != "" {
+		systemInstruction = map[string]interface{}{
+			"parts": []map[string]string{
+				{"text": req.SystemPrompt},
+			},
+		}
+	}
+
+	contents = append(contents, map[string]interface{}{
+		"role": "user",
+		"parts": []map[string]string{
+			{"text": req.UserPrompt},
+		},
+	})
+
+	body := map[string]interface{}{
+		"contents": contents,
+		"generationConfig": map[string]interface{}{
+			"maxOutputTokens": maxTokens,
+		},
+	}
+
+	if len(systemInstruction) > 0 {
+		body["systemInstruction"] = systemInstruction
+	}
+
+	jsonBody, err := json.Marshal(body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	// Use streamGenerateContent endpoint for streaming
+	url := fmt.Sprintf("https://generativelanguage.googleapis.com/v1beta/models/%s:streamGenerateContent?alt=sse&key=%s", g.model, g.apiKey)
+
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(jsonBody))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	// Use a client without timeout for streaming
+	client := &http.Client{}
+	resp, err := client.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("request failed: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		return nil, fmt.Errorf("API error (status %d): %s", resp.StatusCode, string(body))
+	}
+
+	chunks := make(chan StreamChunk, 10)
+
+	go func() {
+		defer close(chunks)
+		defer resp.Body.Close()
+
+		scanner := bufio.NewScanner(resp.Body)
+		scanner.Buffer(make([]byte, 64*1024), 1024*1024)
+
+		modelName := g.model
+
+		for scanner.Scan() {
+			select {
+			case <-ctx.Done():
+				chunks <- StreamChunk{Error: ctx.Err(), Done: true}
+				return
+			default:
+			}
+
+			line := scanner.Text()
+
+			// Gemini SSE format: "data: <json>"
+			if !strings.HasPrefix(line, "data: ") {
+				continue
+			}
+
+			data := strings.TrimPrefix(line, "data: ")
+			if data == "" {
+				continue
+			}
+
+			var event struct {
+				Candidates []struct {
+					Content struct {
+						Parts []struct {
+							Text string `json:"text"`
+						} `json:"parts"`
+					} `json:"content"`
+					FinishReason string `json:"finishReason"`
+				} `json:"candidates"`
+				ModelVersion string `json:"modelVersion"`
+			}
+
+			if err := json.Unmarshal([]byte(data), &event); err != nil {
+				logging.Debug("Gemini stream parse error", "error", err, "data", data)
+				continue
+			}
+
+			if event.ModelVersion != "" {
+				modelName = event.ModelVersion
+			}
+
+			if len(event.Candidates) > 0 {
+				candidate := event.Candidates[0]
+				if len(candidate.Content.Parts) > 0 {
+					text := candidate.Content.Parts[0].Text
+					if text != "" {
+						chunks <- StreamChunk{
+							Content: text,
+							Model:   modelName,
+						}
+					}
+				}
+				if candidate.FinishReason == "STOP" || candidate.FinishReason == "MAX_TOKENS" {
+					chunks <- StreamChunk{
+						Done:  true,
+						Model: modelName,
+					}
+					return
+				}
+			}
+		}
+
+		if err := scanner.Err(); err != nil {
+			chunks <- StreamChunk{Error: err, Done: true}
+		}
+	}()
+
+	return chunks, nil
 }

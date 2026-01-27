@@ -1,12 +1,14 @@
 package brain
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/abelbrown/observer/internal/logging"
@@ -143,4 +145,141 @@ func (g *GrokProvider) Generate(ctx context.Context, req Request) (Response, err
 		Model:       result.Model,
 		RawResponse: string(respBody),
 	}, nil
+}
+
+// GenerateStream implements StreamingProvider for real-time token streaming
+// Uses OpenAI-compatible streaming format
+func (g *GrokProvider) GenerateStream(ctx context.Context, req Request) (<-chan StreamChunk, error) {
+	if !g.Available() {
+		return nil, fmt.Errorf("grok provider not configured")
+	}
+
+	logging.Debug("Grok streaming request starting", "model", g.model)
+
+	maxTokens := req.MaxTokens
+	if maxTokens == 0 {
+		maxTokens = 2048
+	}
+
+	messages := []map[string]string{}
+	if req.SystemPrompt != "" {
+		messages = append(messages, map[string]string{
+			"role":    "system",
+			"content": req.SystemPrompt,
+		})
+	}
+	messages = append(messages, map[string]string{
+		"role":    "user",
+		"content": req.UserPrompt,
+	})
+
+	body := map[string]interface{}{
+		"model":      g.model,
+		"max_tokens": maxTokens,
+		"messages":   messages,
+		"stream":     true,
+	}
+
+	jsonBody, err := json.Marshal(body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", "https://api.x.ai/v1/chat/completions", bytes.NewReader(jsonBody))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Authorization", "Bearer "+g.apiKey)
+
+	client := &http.Client{}
+	resp, err := client.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("request failed: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		return nil, fmt.Errorf("API error (status %d): %s", resp.StatusCode, string(body))
+	}
+
+	chunks := make(chan StreamChunk, 10)
+
+	go func() {
+		defer close(chunks)
+		defer resp.Body.Close()
+
+		scanner := bufio.NewScanner(resp.Body)
+		scanner.Buffer(make([]byte, 64*1024), 1024*1024)
+
+		var modelName string
+
+		for scanner.Scan() {
+			select {
+			case <-ctx.Done():
+				chunks <- StreamChunk{Error: ctx.Err(), Done: true}
+				return
+			default:
+			}
+
+			line := scanner.Text()
+
+			if !strings.HasPrefix(line, "data: ") {
+				continue
+			}
+
+			data := strings.TrimPrefix(line, "data: ")
+			if data == "[DONE]" {
+				chunks <- StreamChunk{
+					Done:  true,
+					Model: modelName,
+				}
+				return
+			}
+
+			var event struct {
+				Model   string `json:"model"`
+				Choices []struct {
+					Delta struct {
+						Content string `json:"content"`
+					} `json:"delta"`
+					FinishReason string `json:"finish_reason"`
+				} `json:"choices"`
+			}
+
+			if err := json.Unmarshal([]byte(data), &event); err != nil {
+				logging.Debug("Grok stream parse error", "error", err, "data", data)
+				continue
+			}
+
+			if modelName == "" && event.Model != "" {
+				modelName = event.Model
+			}
+
+			if len(event.Choices) > 0 {
+				choice := event.Choices[0]
+				if choice.Delta.Content != "" {
+					chunks <- StreamChunk{
+						Content: choice.Delta.Content,
+						Model:   modelName,
+					}
+				}
+				if choice.FinishReason == "stop" || choice.FinishReason == "length" {
+					chunks <- StreamChunk{
+						Done:  true,
+						Model: modelName,
+					}
+					return
+				}
+			}
+		}
+
+		if err := scanner.Err(); err != nil {
+			chunks <- StreamChunk{Error: err, Done: true}
+		}
+	}()
+
+	return chunks, nil
 }

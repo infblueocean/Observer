@@ -1,6 +1,7 @@
 package brain
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -169,4 +170,143 @@ func (c *ClaudeProvider) Generate(ctx context.Context, req Request) (Response, e
 		Model:       result.Model,
 		RawResponse: string(respBody),
 	}, nil
+}
+
+// GenerateStream implements StreamingProvider for real-time token streaming
+func (c *ClaudeProvider) GenerateStream(ctx context.Context, req Request) (<-chan StreamChunk, error) {
+	if !c.Available() {
+		return nil, fmt.Errorf("claude provider not configured")
+	}
+
+	logging.Debug("Claude streaming request starting", "model", c.model)
+
+	maxTokens := req.MaxTokens
+	if maxTokens == 0 {
+		maxTokens = 2048
+	}
+
+	// Build the request body with streaming enabled
+	body := map[string]interface{}{
+		"model":      c.model,
+		"max_tokens": maxTokens,
+		"stream":     true,
+		"messages": []map[string]string{
+			{"role": "user", "content": req.UserPrompt},
+		},
+	}
+
+	if req.SystemPrompt != "" {
+		body["system"] = req.SystemPrompt
+	}
+
+	jsonBody, err := json.Marshal(body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", "https://api.anthropic.com/v1/messages", bytes.NewReader(jsonBody))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("x-api-key", c.apiKey)
+	httpReq.Header.Set("anthropic-version", "2023-06-01")
+
+	// Use a client without timeout for streaming
+	client := &http.Client{}
+	resp, err := client.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("request failed: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		return nil, fmt.Errorf("API error (status %d): %s", resp.StatusCode, string(body))
+	}
+
+	chunks := make(chan StreamChunk, 10)
+
+	go func() {
+		defer close(chunks)
+		defer resp.Body.Close()
+
+		scanner := bufio.NewScanner(resp.Body)
+		scanner.Buffer(make([]byte, 64*1024), 1024*1024)
+
+		var modelName string
+
+		for scanner.Scan() {
+			select {
+			case <-ctx.Done():
+				chunks <- StreamChunk{Error: ctx.Err(), Done: true}
+				return
+			default:
+			}
+
+			line := scanner.Text()
+
+			// Claude SSE format: "event: <type>" followed by "data: <json>"
+			if strings.HasPrefix(line, "data: ") {
+				data := strings.TrimPrefix(line, "data: ")
+				if data == "" {
+					continue
+				}
+
+				var event struct {
+					Type    string `json:"type"`
+					Message struct {
+						Model string `json:"model"`
+					} `json:"message"`
+					Delta struct {
+						Type       string `json:"type"`
+						Text       string `json:"text"`
+						StopReason string `json:"stop_reason"`
+					} `json:"delta"`
+					ContentBlock struct {
+						Type string `json:"type"`
+						Text string `json:"text"`
+					} `json:"content_block"`
+				}
+
+				if err := json.Unmarshal([]byte(data), &event); err != nil {
+					logging.Debug("Claude stream parse error", "error", err, "data", data)
+					continue
+				}
+
+				switch event.Type {
+				case "message_start":
+					modelName = event.Message.Model
+				case "content_block_delta":
+					if event.Delta.Text != "" {
+						chunks <- StreamChunk{
+							Content: event.Delta.Text,
+							Model:   modelName,
+						}
+					}
+				case "message_delta":
+					if event.Delta.StopReason != "" {
+						chunks <- StreamChunk{
+							Done:  true,
+							Model: modelName,
+						}
+						return
+					}
+				case "message_stop":
+					chunks <- StreamChunk{
+						Done:  true,
+						Model: modelName,
+					}
+					return
+				}
+			}
+		}
+
+		if err := scanner.Err(); err != nil {
+			chunks <- StreamChunk{Error: err, Done: true}
+		}
+	}()
+
+	return chunks, nil
 }

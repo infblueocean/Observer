@@ -1737,13 +1737,39 @@ func mapLabel(label string) string {
 }
 
 // GetStreamingProvider returns a provider that supports streaming, or nil if none available
-// Prefers local Ollama provider for streaming
+// Prefers local Ollama provider, then falls back to cloud providers
 func (a *Analyzer) GetStreamingProvider() StreamingProvider {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 
+	// First try local Ollama
 	for _, p := range a.providers {
 		if p != nil && p.Name() == "ollama" && p.Available() {
+			if sp, ok := p.(StreamingProvider); ok {
+				return sp
+			}
+		}
+	}
+
+	// Fall back to any streaming-capable provider
+	for _, p := range a.providers {
+		if p != nil && p.Available() {
+			if sp, ok := p.(StreamingProvider); ok {
+				return sp
+			}
+		}
+	}
+	return nil
+}
+
+// GetCloudStreamingProvider returns a cloud provider that supports streaming
+func (a *Analyzer) GetCloudStreamingProvider() StreamingProvider {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+
+	// Get any non-local streaming provider
+	for _, p := range a.providers {
+		if p != nil && p.Name() != "ollama" && p.Available() {
 			if sp, ok := p.(StreamingProvider); ok {
 				return sp
 			}

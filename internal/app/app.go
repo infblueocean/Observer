@@ -838,7 +838,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.config.Save()
 
 	case "a":
-		// Trigger AI analysis on selected item with random provider
+		// Trigger AI analysis on selected item with cloud provider (streaming)
 		if item := m.stream.SelectedItem(); item != nil {
 			// Don't trigger if analysis already in progress (for any item)
 			// This prevents issues when feed updates change cursor position
@@ -866,9 +866,9 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				streamHeight -= 3
 			}
 			m.stream.SetSize(m.width, streamHeight)
-			// Start spinner animation and analysis with random provider
+			// Use streaming for cloud analysis - tokens appear as generated
 			return m, tea.Batch(
-				m.analyzeBrainTrustRandom(*item),
+				m.analyzeBrainTrustCloudStreaming(*item),
 				m.brainTrustPanel.Spinner().Tick,
 			)
 		}
@@ -1694,6 +1694,49 @@ func (m Model) analyzeBrainTrustStreaming(item feeds.Item) tea.Cmd {
 
 		// Return the stream start message with the channel
 		// The Update handler will store it and start reading
+		return BrainTrustStreamStartMsg{
+			ItemID:    item.ID,
+			ItemTitle: item.Title,
+			Chunks:    chunks,
+		}
+	}
+}
+
+// analyzeBrainTrustCloudStreaming triggers streaming analysis using cloud provider
+// Tokens are displayed as they arrive for better UX during API calls
+func (m Model) analyzeBrainTrustCloudStreaming(item feeds.Item) tea.Cmd {
+	topStoriesContext := m.brainTrust.GetTopStoriesContext()
+
+	return func() tea.Msg {
+		// Check if we have a cloud streaming provider
+		streamingProvider := m.brainTrust.GetCloudStreamingProvider()
+		if streamingProvider == nil {
+			// Fall back to non-streaming random provider
+			logging.Debug("No cloud streaming provider available, using non-streaming")
+			return m.analyzeBrainTrustRandom(item)()
+		}
+
+		logging.Debug("Starting cloud streaming analysis", "provider", streamingProvider.(brain.Provider).Name())
+
+		// Build the analysis prompt
+		systemPrompt, userPrompt := m.brainTrust.BuildAnalysisPrompt(item, topStoriesContext)
+
+		ctx := context.Background()
+		chunks, err := streamingProvider.GenerateStream(ctx, brain.Request{
+			SystemPrompt: systemPrompt,
+			UserPrompt:   userPrompt,
+			MaxTokens:    1500, // Cloud can handle more tokens
+		})
+		if err != nil {
+			logging.Error("Failed to start cloud streaming analysis", "error", err)
+			return BrainTrustAnalysisMsg{
+				ItemID:    item.ID,
+				ItemTitle: item.Title,
+				Analysis:  brain.Analysis{Error: err},
+			}
+		}
+
+		// Return the stream start message with the channel
 		return BrainTrustStreamStartMsg{
 			ItemID:    item.ID,
 			ItemTitle: item.Title,
