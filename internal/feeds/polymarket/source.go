@@ -124,12 +124,20 @@ func (s *Source) Fetch() ([]feeds.Item, error) {
 }
 
 func parseFirstPrice(pricesJSON string) float64 {
-	var prices []float64
-	if err := json.Unmarshal([]byte(pricesJSON), &prices); err != nil {
-		return 0.5
+	// Try parsing as []float64 first
+	var floatPrices []float64
+	if err := json.Unmarshal([]byte(pricesJSON), &floatPrices); err == nil && len(floatPrices) > 0 {
+		return floatPrices[0]
 	}
-	if len(prices) > 0 {
-		return prices[0]
+
+	// Try parsing as []string (API sometimes returns string values)
+	var stringPrices []string
+	if err := json.Unmarshal([]byte(pricesJSON), &stringPrices); err == nil && len(stringPrices) > 0 {
+		var price float64
+		if _, err := fmt.Sscanf(stringPrices[0], "%f", &price); err == nil {
+			return price
+		}
 	}
+
 	return 0.5
 }
