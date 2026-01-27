@@ -76,18 +76,6 @@ const (
 	CorrelationHistorical CorrelationType = "historical"
 )
 
-// Thread represents an ongoing story/topic over time
-type Thread struct {
-	ID          string
-	Name        string
-	Description string
-	Entities    []string    // Core entities in this thread
-	Items       []string    // Item IDs in chronological order
-	FirstItem   time.Time
-	LastItem    time.Time
-	Active      bool        // Still developing?
-}
-
 // ActivityType represents a type of correlation activity
 type ActivityType string
 
@@ -120,7 +108,6 @@ type Stats struct {
 type Engine struct {
 	db          *sql.DB
 	extractor   EntityExtractor
-	correlator  AICorrelator
 
 	// Activity tracking for transparency
 	recentActivity []Activity
@@ -195,24 +182,11 @@ type EntityExtractor interface {
 	Extract(item feeds.Item) ([]ItemEntity, error)
 }
 
-// AICorrelator finds deeper correlations (AI-powered)
-type AICorrelator interface {
-	// FindCorrelations between a new item and historical items
-	FindCorrelations(newItem feeds.Item, candidates []feeds.Item) ([]Correlation, error)
-
-	// ExplainCorrelation generates human-readable explanation
-	ExplainCorrelation(corr Correlation, items []feeds.Item) (string, error)
-
-	// IdentifyThread determines if item belongs to existing thread
-	IdentifyThread(item feeds.Item, threads []Thread) (*Thread, float64, error)
-}
-
 // NewEngine creates a correlation engine
-func NewEngine(db *sql.DB, extractor EntityExtractor, correlator AICorrelator) (*Engine, error) {
+func NewEngine(db *sql.DB, extractor EntityExtractor) (*Engine, error) {
 	e := &Engine{
 		db:                   db,
 		extractor:            extractor,
-		correlator:           correlator,
 		duplicateGroups:      make(map[string]*DuplicateGroup),
 		itemToGroup:          make(map[string]string),
 		itemHashes:           make(map[string]uint64),
@@ -232,9 +206,9 @@ func NewEngine(db *sql.DB, extractor EntityExtractor, correlator AICorrelator) (
 	return e, nil
 }
 
-// NewEngineSimple creates a correlation engine with just cheap extraction (no AI)
+// NewEngineSimple creates a correlation engine with just cheap extraction
 func NewEngineSimple(db *sql.DB) (*Engine, error) {
-	return NewEngine(db, NewCheapExtractor(), nil)
+	return NewEngine(db, NewCheapExtractor())
 }
 
 func (e *Engine) migrate() error {
@@ -273,18 +247,6 @@ func (e *Engine) migrate() error {
 		created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 	);
 	CREATE INDEX IF NOT EXISTS idx_correlations_type ON correlations(type);
-
-	-- Threads (ongoing stories)
-	CREATE TABLE IF NOT EXISTS threads (
-		id TEXT PRIMARY KEY,
-		name TEXT NOT NULL,
-		description TEXT,
-		entities TEXT,            -- JSON array
-		items TEXT,               -- JSON array of item IDs (chronological)
-		first_item DATETIME,
-		last_item DATETIME,
-		active INTEGER DEFAULT 1
-	);
 	`
 	_, err := e.db.Exec(schema)
 	return err
@@ -332,25 +294,6 @@ func (e *Engine) ProcessItem(item feeds.Item) (*ItemCorrelations, error) {
 	related, err := e.findRelatedItems(item, result.Entities)
 	if err == nil {
 		result.RelatedItems = related
-	}
-
-	// Find/create correlations
-	if e.correlator != nil && len(related) > 0 {
-		correlations, err := e.correlator.FindCorrelations(item, related)
-		if err == nil {
-			result.Correlations = correlations
-			e.storeCorrelations(correlations)
-		}
-	}
-
-	// Check if this belongs to an existing thread
-	threads, _ := e.getActiveThreads()
-	if e.correlator != nil && len(threads) > 0 {
-		thread, confidence, err := e.correlator.IdentifyThread(item, threads)
-		if err == nil && confidence > 0.7 {
-			result.Thread = thread
-			e.addItemToThread(thread.ID, item.ID)
-		}
 	}
 
 	// Try to assign to a cluster (by entity overlap or title similarity)
@@ -860,7 +803,6 @@ type ItemCorrelations struct {
 	Entities       []ItemEntity
 	RelatedItems   []feeds.Item
 	Correlations   []Correlation
-	Thread         *Thread
 	DuplicateGroup *DuplicateGroup
 	Cluster        *Cluster
 }
@@ -1011,16 +953,6 @@ func (e *Engine) storeCorrelations(correlations []Correlation) error {
 	return nil
 }
 
-func (e *Engine) getActiveThreads() ([]Thread, error) {
-	// TODO: Implement thread retrieval
-	return nil, nil
-}
-
-func (e *Engine) addItemToThread(threadID, itemID string) error {
-	// TODO: Implement adding item to thread
-	return nil
-}
-
 // GetEntityTimeline returns all items mentioning an entity, chronologically
 func (e *Engine) GetEntityTimeline(entityID string) ([]feeds.Item, error) {
 	query := `
@@ -1089,34 +1021,6 @@ func (e *Engine) GetTopEntities(since time.Time, limit int) ([]Entity, error) {
 	return entities, nil
 }
 
-// GetThreads returns all threads, optionally filtered by active status
-func (e *Engine) GetThreads(activeOnly bool) ([]Thread, error) {
-	query := `SELECT id, name, description, first_item, last_item, active FROM threads`
-	if activeOnly {
-		query += ` WHERE active = 1`
-	}
-	query += ` ORDER BY last_item DESC`
-
-	rows, err := e.db.Query(query)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var threads []Thread
-	for rows.Next() {
-		var t Thread
-		var active int
-		err := rows.Scan(&t.ID, &t.Name, &t.Description, &t.FirstItem, &t.LastItem, &active)
-		if err != nil {
-			continue
-		}
-		t.Active = active == 1
-		threads = append(threads, t)
-	}
-
-	return threads, nil
-}
 
 func min(a, b int) int {
 	if a < b {
