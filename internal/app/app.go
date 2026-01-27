@@ -200,6 +200,27 @@ func New() Model {
 		logging.Info("Claude provider added", "model", cfg.Models.Claude.Model)
 	}
 
+	// Add OpenAI provider (cloud)
+	if cfg.Models.OpenAI.Enabled && cfg.Models.OpenAI.APIKey != "" {
+		openaiProvider := brain.NewOpenAIProvider(cfg.Models.OpenAI.APIKey, cfg.Models.OpenAI.Model)
+		brainTrustInstance.AddProvider(openaiProvider)
+		logging.Info("OpenAI provider added", "model", cfg.Models.OpenAI.Model)
+	}
+
+	// Add Gemini provider (cloud)
+	if cfg.Models.Gemini.Enabled && cfg.Models.Gemini.APIKey != "" {
+		geminiProvider := brain.NewGeminiProvider(cfg.Models.Gemini.APIKey, cfg.Models.Gemini.Model)
+		brainTrustInstance.AddProvider(geminiProvider)
+		logging.Info("Gemini provider added", "model", cfg.Models.Gemini.Model)
+	}
+
+	// Add Grok provider (cloud)
+	if cfg.Models.Grok.Enabled && cfg.Models.Grok.APIKey != "" {
+		grokProvider := brain.NewGrokProvider(cfg.Models.Grok.APIKey, cfg.Models.Grok.Model)
+		brainTrustInstance.AddProvider(grokProvider)
+		logging.Info("Grok provider added", "model", cfg.Models.Grok.Model)
+	}
+
 	// Connect store to analyzer for persistence
 	if st != nil {
 		brainTrustInstance.SetStore(st)
