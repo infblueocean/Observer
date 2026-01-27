@@ -733,10 +733,16 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.config.Save()
 
 	case "a":
-		// Trigger AI analysis on selected item
+		// Trigger AI analysis on selected item with random provider
 		if item := m.stream.SelectedItem(); item != nil {
+			// Don't trigger if analysis already in progress
+			if m.brainTrust.IsAnalysisLoading(item.ID) {
+				logging.Debug("Analysis already in progress, ignoring 'a' key", "item", item.ID)
+				return m, nil
+			}
+
 			m.showBrainTrust = true
-			m.brainTrustPanel.Clear() // Clear any previous content
+			m.brainTrustPanel.Clear() // Clear any previous display (but keeps DB history)
 			m.brainTrustPanel.SetVisible(true)
 			// AI panel gets max 33% of screen
 			aiHeight := min(m.height/2, 20)
@@ -751,9 +757,9 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				streamHeight -= 3
 			}
 			m.stream.SetSize(m.width, streamHeight)
-			// Start spinner animation and analysis
+			// Start spinner animation and analysis with random provider
 			return m, tea.Batch(
-				m.analyzeBrainTrust(*item),
+				m.analyzeBrainTrustRandom(*item),
 				m.brainTrustPanel.Spinner().Tick,
 			)
 		}
@@ -1417,6 +1423,45 @@ func (m Model) analyzeBrainTrust(item feeds.Item) tea.Cmd {
 				analysis := m.brainTrust.GetAnalysis(item.ID)
 				if analysis != nil && !analysis.Loading {
 					logging.Debug("AI analysis complete", "item", item.ID)
+					return BrainTrustAnalysisMsg{
+						ItemID:   item.ID,
+						Analysis: *analysis,
+					}
+				}
+			case <-timeout:
+				logging.Warn("AI analysis timed out", "item", item.Title)
+				return BrainTrustAnalysisMsg{
+					ItemID:   item.ID,
+					Analysis: brain.Analysis{Error: fmt.Errorf("analysis timed out")},
+				}
+			}
+		}
+	}
+}
+
+// analyzeBrainTrustRandom triggers analysis with a randomly selected provider
+// Each press of 'a' may use a different provider for variety
+func (m Model) analyzeBrainTrustRandom(item feeds.Item) tea.Cmd {
+	topStoriesContext := m.brainTrust.GetTopStoriesContext()
+
+	return func() tea.Msg {
+		// Clear in-memory cache to start fresh (DB history preserved)
+		m.brainTrust.ClearAnalysis(item.ID)
+
+		ctx := context.Background()
+		m.brainTrust.AnalyzeRandomProvider(ctx, item, topStoriesContext)
+
+		// Poll until analysis is complete or timeout
+		ticker := time.NewTicker(300 * time.Millisecond)
+		defer ticker.Stop()
+
+		timeout := time.After(120 * time.Second)
+		for {
+			select {
+			case <-ticker.C:
+				analysis := m.brainTrust.GetAnalysis(item.ID)
+				if analysis != nil && !analysis.Loading {
+					logging.Debug("AI analysis complete (random provider)", "item", item.ID)
 					return BrainTrustAnalysisMsg{
 						ItemID:   item.ID,
 						Analysis: *analysis,

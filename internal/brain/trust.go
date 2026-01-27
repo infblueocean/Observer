@@ -456,11 +456,150 @@ func (a *Analyzer) HasAnalysis(itemID string) bool {
 	return false
 }
 
-// ClearAnalysis removes analysis for an item
+// ClearAnalysis removes analysis for an item (in-memory only, keeps database history)
 func (a *Analyzer) ClearAnalysis(itemID string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	delete(a.analyses, itemID)
+}
+
+// IsAnalysisLoading returns true if analysis is currently in progress for an item
+func (a *Analyzer) IsAnalysisLoading(itemID string) bool {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	if analysis, ok := a.analyses[itemID]; ok {
+		return analysis.Loading
+	}
+	return false
+}
+
+// AnalyzeRandomProvider analyzes an item using a randomly selected provider
+// This gives variety in analysis perspectives
+func (a *Analyzer) AnalyzeRandomProvider(ctx context.Context, item feeds.Item, topStoriesContext string) {
+	a.mu.RLock()
+	// Check if analysis already in progress
+	if existing, ok := a.analyses[item.ID]; ok && existing != nil && existing.Loading {
+		logging.Debug("AI analysis already in progress", "item", item.ID)
+		a.mu.RUnlock()
+		return
+	}
+
+	// Get a random provider from all available
+	provider := a.getRandomProvider()
+	a.mu.RUnlock()
+
+	if provider == nil {
+		logging.Debug("AI analysis skipped - no provider available")
+		return
+	}
+
+	providerName := provider.Name()
+	logging.Info("AI analysis started (random provider)", "item", item.Title, "provider", providerName)
+
+	// Build the item summary for analysis
+	itemSummary := fmt.Sprintf("Title: %s\n", item.Title)
+	if item.Summary != "" {
+		itemSummary += fmt.Sprintf("Summary: %s\n", item.Summary)
+	}
+	if item.SourceName != "" {
+		itemSummary += fmt.Sprintf("Source: %s\n", item.SourceName)
+	}
+	if item.URL != "" {
+		itemSummary += fmt.Sprintf("URL: %s\n", item.URL)
+	}
+
+	hasTopStories := topStoriesContext != ""
+
+	var systemPrompt string
+	if hasTopStories {
+		systemPrompt = `You are a seasoned news analyst in the tradition of Dan Rather, Walter Cronkite, or Christiane Amanpour. Analyze this news with the gravitas and insight of a veteran journalist who has seen history unfold.
+
+Write 2-3 paragraphs covering:
+- What this means and why it matters to ordinary people
+- Historical parallels or precedents you've witnessed
+- The questions a good journalist would ask next
+
+Then write 1 paragraph on how it connects to the current top stories.
+
+RULES:
+- Start directly with your analysis. No preamble like "Certainly" or "Here's my analysis".
+- Plain text only. No markdown, no headers, no bullet points.
+- Be direct, authoritative, and occasionally wry.`
+	} else {
+		systemPrompt = `You are a seasoned news analyst in the tradition of Dan Rather, Walter Cronkite, or Christiane Amanpour. Analyze this news with the gravitas and insight of a veteran journalist who has seen history unfold.
+
+Write 2-3 paragraphs covering:
+- What this means and why it matters to ordinary people
+- Historical parallels or precedents you've witnessed
+- The questions a good journalist would ask next
+
+RULES:
+- Start directly with your analysis. No preamble like "Certainly" or "Here's my analysis".
+- Plain text only. No markdown, no headers, no bullet points.
+- Be direct, authoritative, and occasionally wry.`
+	}
+
+	var userPrompt string
+	if hasTopStories {
+		userPrompt = fmt.Sprintf("Analyze this news item:\n\n%s\n%s", itemSummary, topStoriesContext)
+	} else {
+		userPrompt = fmt.Sprintf("Analyze this news item:\n\n%s", itemSummary)
+	}
+
+	// Initialize loading state
+	a.mu.Lock()
+	a.analyses[item.ID] = &Analysis{Loading: true, Provider: providerName, Stage: "starting"}
+	a.mu.Unlock()
+
+	// Run analysis in goroutine
+	go func() {
+		a.mu.Lock()
+		if existing, ok := a.analyses[item.ID]; ok {
+			existing.Stage = "analyzing"
+		}
+		a.mu.Unlock()
+
+		resp, err := provider.Generate(ctx, Request{
+			SystemPrompt: systemPrompt,
+			UserPrompt:   userPrompt,
+			MaxTokens:    800,
+		})
+
+		pipeline := []string{resp.Model}
+
+		// For local provider, do cleanup pass if transcript model available
+		if providerName == "ollama" {
+			if ollamaProvider, ok := provider.(*OllamaProvider); ok && err == nil {
+				transcriptModel := ollamaProvider.GetTranscriptModel()
+				if transcriptModel != "" {
+					a.mu.Lock()
+					if existing, ok := a.analyses[item.ID]; ok {
+						existing.Stage = "summarizing"
+						existing.Provider = "ollama (cleaning up)"
+					}
+					a.mu.Unlock()
+
+					cleanupPrompt := `Clean up this news analysis. Remove any preamble like "Certainly" or "Here's". Remove markdown formatting (##, **, bullets). Output clean paragraphs only.
+
+Analysis to clean:
+` + resp.Content
+
+					cleanResp, cleanErr := ollamaProvider.GenerateWithModel(ctx, transcriptModel, Request{
+						SystemPrompt: "You clean up text. Output only the cleaned text, nothing else.",
+						UserPrompt:   cleanupPrompt,
+						MaxTokens:    500,
+					})
+
+					if cleanErr == nil && len(cleanResp.Content) > 50 {
+						resp.Content = cleanResp.Content
+						pipeline = append(pipeline, transcriptModel+" (cleanup)")
+					}
+				}
+			}
+		}
+
+		a.runAnalysisCompleteWithPipeline(item, providerName, resp, err, userPrompt, pipeline)
+	}()
 }
 
 // TopStoryResult represents an AI-identified important story
