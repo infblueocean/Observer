@@ -1,782 +1,293 @@
 package correlation
 
 import (
+	"context"
 	"database/sql"
-	"fmt"
-	"strings"
+	"sync"
 	"time"
 
 	"github.com/abelbrown/observer/internal/feeds"
 	"github.com/abelbrown/observer/internal/logging"
 )
 
-// EntityType categorizes extracted entities
-type EntityType string
-
-const (
-	EntityPerson       EntityType = "person"
-	EntityOrganization EntityType = "organization"
-	EntityLocation     EntityType = "location"
-	EntityTopic        EntityType = "topic"
-	EntityTicker       EntityType = "ticker"  // Stock symbols
-	EntityMarket       EntityType = "market"  // Prediction market
-	EntityEvent        EntityType = "event"   // Named events (elections, etc.)
-)
-
-// Entity represents an extracted entity from content
-type Entity struct {
-	ID         string
-	Name       string
-	Type       EntityType
-	Aliases    []string  // Alternative names
-	FirstSeen  time.Time
-	LastSeen   time.Time
-	Mentions   int       // Total mention count
-}
-
-// ItemEntity links items to entities
-type ItemEntity struct {
-	ItemID   string
-	EntityID string
-	Context  string  // The sentence/phrase where entity appeared
-	Salience float64 // How important is this entity to the item (0-1)
-}
-
-// Correlation represents a connection between items
-type Correlation struct {
-	ID           string
-	Type         CorrelationType
-	Items        []string    // Item IDs involved
-	Entities     []string    // Shared entity IDs
-	Strength     float64     // How strong is the correlation (0-1)
-	CreatedAt    time.Time
-	Description  string      // Human-readable explanation
-}
-
-// CorrelationType categorizes correlations
-type CorrelationType string
-
-const (
-	// Same entities appearing across time
-	CorrelationEntity CorrelationType = "entity"
-
-	// Same topic/theme evolving
-	CorrelationTopic CorrelationType = "topic"
-
-	// Prediction → Outcome (market predicted, now resolved)
-	CorrelationPrediction CorrelationType = "prediction"
-
-	// Multiple sources covering same story
-	CorrelationCoverage CorrelationType = "coverage"
-
-	// Cause → Effect relationships
-	CorrelationCausal CorrelationType = "causal"
-
-	// Similar events in history
-	CorrelationHistorical CorrelationType = "historical"
-)
-
-// ActivityType represents a type of correlation activity
-type ActivityType string
-
-const (
-	ActivityExtract    ActivityType = "extract"
-	ActivityCluster    ActivityType = "cluster"
-	ActivityDuplicate  ActivityType = "duplicate"
-	ActivityDisagree   ActivityType = "disagree"
-)
-
-// Activity represents a single correlation engine action
-type Activity struct {
-	Type      ActivityType
-	Time      time.Time
-	ItemTitle string
-	Details   string // e.g., "found: US, China, Trade" or "joined cluster with 5 items"
-}
-
-// Stats holds correlation engine statistics
-type Stats struct {
-	ItemsProcessed   int
-	EntitiesFound    int
-	ClustersFormed   int
-	DuplicatesFound  int
-	DisagreementsFound int
-	StartTime        time.Time
-}
-
-// Engine handles correlation detection and storage
+// Engine is the correlation pipeline orchestrator.
+// It coordinates all stages and provides non-blocking queries for the UI.
 type Engine struct {
-	db          *sql.DB
-	extractor   EntityExtractor
+	// Pipeline components
+	bus      *Bus
+	dedup    *DedupIndex
+	entities *Worker[*feeds.Item, *EntityResult]
+	clusters *ClusterEngine
+	velocity *VelocityTracker
 
-	// Activity tracking for transparency
-	recentActivity []Activity
-	activityIndex  int
-	stats          Stats
+	// Caches for UI (sync.Map for lock-free reads)
+	entityCache sync.Map // itemID → []Entity
 
-	// Duplicate tracking (in-memory for speed)
-	duplicateGroups map[string]*DuplicateGroup // simhash key -> group
-	itemToGroup     map[string]string          // item ID -> group ID
-	itemHashes      map[string]uint64          // item ID -> simhash
+	// Storage (async writes)
+	db *sql.DB
 
-	// Cluster tracking
-	clusters       map[string]*Cluster      // cluster ID -> cluster
-	itemToCluster  map[string]string        // item ID -> cluster ID
-	clusterHistory map[string][]VelocitySnapshot // cluster ID -> velocity history
-
-	// Entity tracking (in-memory cache)
-	itemEntities   map[string][]ItemEntity       // item ID -> entities
-	entityVelocity map[string][]VelocitySnapshot // entity ID -> velocity history
-
-	// Claim and disagreement tracking
-	itemClaims          map[string][]ExtractedClaim // item ID -> extracted claims
-	clusterDisagreements map[string][]DisagreementInfo // cluster ID -> disagreements
+	// Lifecycle
+	ctx    context.Context
+	cancel context.CancelFunc
+	wg     sync.WaitGroup
 }
 
-const maxActivityEntries = 50
-
-// addActivity adds an activity to the ring buffer
-func (e *Engine) addActivity(actType ActivityType, itemTitle, details string) {
-	if e.recentActivity == nil {
-		e.recentActivity = make([]Activity, maxActivityEntries)
+// NewEngine creates a correlation engine.
+func NewEngine(db *sql.DB) *Engine {
+	return &Engine{
+		bus:      NewBus(1000),
+		dedup:    NewDedupIndex(),
+		entities: NewEntityWorker(4, 1000), // 4 workers
+		clusters: NewClusterEngine(),
+		velocity: NewVelocityTracker(),
+		db:       db,
 	}
-	e.recentActivity[e.activityIndex] = Activity{
-		Type:      actType,
-		Time:      time.Now(),
-		ItemTitle: itemTitle,
-		Details:   details,
-	}
-	e.activityIndex = (e.activityIndex + 1) % maxActivityEntries
 }
 
-// GetRecentActivity returns recent activities (newest first)
-func (e *Engine) GetRecentActivity(count int) []Activity {
-	if e.recentActivity == nil {
-		return nil
-	}
-	if count > maxActivityEntries {
-		count = maxActivityEntries
-	}
-
-	result := make([]Activity, 0, count)
-	idx := (e.activityIndex - 1 + maxActivityEntries) % maxActivityEntries
-	for i := 0; i < count; i++ {
-		act := e.recentActivity[idx]
-		if act.Time.IsZero() {
-			break
-		}
-		result = append(result, act)
-		idx = (idx - 1 + maxActivityEntries) % maxActivityEntries
-	}
-	return result
-}
-
-// GetStats returns current engine statistics
-func (e *Engine) GetStats() Stats {
-	return e.stats
-}
-
-// EntityExtractor extracts entities from text (AI-powered)
-type EntityExtractor interface {
-	// Extract entities from item title and content
-	Extract(item feeds.Item) ([]ItemEntity, error)
-}
-
-// NewEngine creates a correlation engine
-func NewEngine(db *sql.DB, extractor EntityExtractor) (*Engine, error) {
-	e := &Engine{
-		db:                   db,
-		extractor:            extractor,
-		duplicateGroups:      make(map[string]*DuplicateGroup),
-		itemToGroup:          make(map[string]string),
-		itemHashes:           make(map[string]uint64),
-		clusters:             make(map[string]*Cluster),
-		itemToCluster:        make(map[string]string),
-		clusterHistory:       make(map[string][]VelocitySnapshot),
-		itemEntities:         make(map[string][]ItemEntity),
-		entityVelocity:       make(map[string][]VelocitySnapshot),
-		itemClaims:           make(map[string][]ExtractedClaim),
-		clusterDisagreements: make(map[string][]DisagreementInfo),
-	}
-
-	if err := e.migrate(); err != nil {
-		return nil, err
-	}
-
-	return e, nil
-}
-
-// NewEngineSimple creates a correlation engine with just cheap extraction
+// NewEngineSimple creates a correlation engine (alias for NewEngine for backward compatibility).
 func NewEngineSimple(db *sql.DB) (*Engine, error) {
-	return NewEngine(db, NewCheapExtractor())
+	return NewEngine(db), nil
 }
 
-func (e *Engine) migrate() error {
-	schema := `
-	-- Entities table
-	CREATE TABLE IF NOT EXISTS entities (
-		id TEXT PRIMARY KEY,
-		name TEXT NOT NULL,
-		type TEXT NOT NULL,
-		aliases TEXT,  -- JSON array
-		first_seen DATETIME,
-		last_seen DATETIME,
-		mentions INTEGER DEFAULT 0
-	);
-	CREATE INDEX IF NOT EXISTS idx_entities_name ON entities(name);
-	CREATE INDEX IF NOT EXISTS idx_entities_type ON entities(type);
+// Start launches the pipeline goroutines.
+func (e *Engine) Start(ctx context.Context) {
+	e.ctx, e.cancel = context.WithCancel(ctx)
+	e.bus.Start(e.ctx)
+	e.entities.Start(e.ctx)
 
-	-- Item-Entity relationships
-	CREATE TABLE IF NOT EXISTS item_entities (
-		item_id TEXT NOT NULL,
-		entity_id TEXT NOT NULL,
-		context TEXT,
-		salience REAL DEFAULT 0.5,
-		PRIMARY KEY (item_id, entity_id)
-	);
-	CREATE INDEX IF NOT EXISTS idx_item_entities_entity ON item_entities(entity_id);
+	// Pipeline coordinator
+	e.wg.Add(1)
+	go e.runPipeline()
 
-	-- Correlations
-	CREATE TABLE IF NOT EXISTS correlations (
-		id TEXT PRIMARY KEY,
-		type TEXT NOT NULL,
-		items TEXT NOT NULL,      -- JSON array of item IDs
-		entities TEXT,            -- JSON array of entity IDs
-		strength REAL DEFAULT 0.5,
-		description TEXT,
-		created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-	);
-	CREATE INDEX IF NOT EXISTS idx_correlations_type ON correlations(type);
-	`
-	_, err := e.db.Exec(schema)
-	return err
+	// Periodic tasks (DB persistence, pruning)
+	e.wg.Add(1)
+	go e.runPeriodicTasks()
+
+	logging.Info("Correlation engine started")
 }
 
-// ProcessItem extracts entities and finds correlations for a new item
-func (e *Engine) ProcessItem(item feeds.Item) (*ItemCorrelations, error) {
-	result := &ItemCorrelations{
-		Item: item,
+// Stop gracefully shuts down the engine.
+func (e *Engine) Stop() {
+	if e.cancel != nil {
+		e.cancel()
 	}
+	e.bus.Stop()
+	e.wg.Wait()
+	logging.Info("Correlation engine stopped")
+}
 
-	// Calculate SimHash for duplicate detection
-	hash := SimHash(item.Title)
-	e.itemHashes[item.ID] = hash
+// runPipeline is the main pipeline coordinator goroutine.
+func (e *Engine) runPipeline() {
+	defer e.wg.Done()
 
-	// Check for duplicates
-	result.DuplicateGroup = e.findOrCreateDuplicateGroup(item, hash)
+	for {
+		select {
+		case <-e.ctx.Done():
+			return
 
-	// Extract entities
-	if e.extractor != nil {
-		entities, err := e.extractor.Extract(item)
-		if err == nil {
-			result.Entities = entities
-			e.itemEntities[item.ID] = entities
-			e.storeEntities(item, entities)
-			if len(entities) > 0 {
-				entityNames := make([]string, len(entities))
-				for i, ent := range entities {
-					entityNames[i] = ent.EntityID
-				}
-				logging.Info("Correlation: extracted entities", "item", truncateTitle(item.Title, 50), "entity_count", len(entities), "entities", entityNames)
+		// Stage 1: Dedup (INLINE - Law #1)
+		case item := <-e.bus.items:
+			isDupe, primaryID, size := e.dedup.Check(item)
+			if isDupe {
+				e.bus.Send(DuplicateFound{
+					ItemID:    item.ID,
+					PrimaryID: primaryID,
+					GroupSize: size,
+				})
+				continue // Don't process duplicates further
+			}
+			// Send to Stage 2: Entity extraction
+			select {
+			case e.entities.In() <- item:
+			default:
+				// Backpressure - drop
+				logging.Debug("Entity worker backpressure, dropping item", "id", item.ID)
+			}
 
-				// Track activity
-				e.stats.EntitiesFound += len(entities)
-				details := fmt.Sprintf("→ %s", strings.Join(entityNames[:min(len(entityNames), 4)], ", "))
-				if len(entityNames) > 4 {
-					details += fmt.Sprintf(" +%d more", len(entityNames)-4)
-				}
-				e.addActivity(ActivityExtract, truncateTitle(item.Title, 40), details)
+		// Stage 2 output → Stage 3+4
+		case er := <-e.entities.Out():
+			// Cache for instant UI queries
+			e.entityCache.Store(er.ItemID, er.Entities)
+
+			// Emit entities event
+			e.bus.Send(EntitiesExtracted{
+				ItemID:   er.ItemID,
+				Entities: er.Entities,
+			})
+
+			// Stage 3: Cluster assignment
+			cr := e.clusters.AssignToCluster(er)
+
+			// Stage 4: Velocity tracking
+			spike := e.velocity.Record(cr.Cluster.ID, cr.Cluster.Size, 1)
+
+			// Emit cluster event
+			e.bus.Send(ClusterUpdated{
+				ClusterID: cr.Cluster.ID,
+				ItemID:    cr.ItemID,
+				Size:      cr.Cluster.Size,
+				Velocity:  e.velocity.GetVelocity(cr.Cluster.ID),
+				Sparkline: e.velocity.GetSparkline(cr.Cluster.ID, 8),
+				IsNew:     cr.IsNew,
+			})
+
+			// Emit spike if detected
+			if spike != nil {
+				logging.Info("Velocity spike detected",
+					"cluster", spike.ClusterID,
+					"window", spike.Window,
+					"rate", spike.Rate)
 			}
 		}
 	}
-
-	// Find related historical items
-	related, err := e.findRelatedItems(item, result.Entities)
-	if err == nil {
-		result.RelatedItems = related
-	}
-
-	// Try to assign to a cluster (by entity overlap or title similarity)
-	result.Cluster = e.findOrCreateCluster(item, result.Entities, hash)
-	if result.Cluster != nil {
-		logging.Debug("Correlation: item assigned to cluster", "item", truncateTitle(item.Title, 50), "cluster", result.Cluster.ID, "cluster_items", result.Cluster.ItemCount)
-
-		// Track activity
-		e.stats.ClustersFormed++
-		details := fmt.Sprintf("joined cluster (%d items)", result.Cluster.ItemCount)
-		e.addActivity(ActivityCluster, truncateTitle(item.Title, 40), details)
-	}
-
-	// Extract claims for disagreement detection
-	text := item.Title + " " + item.Summary + " " + item.Content
-	claims := ExtractClaims(text)
-	if len(claims) > 0 {
-		e.itemClaims[item.ID] = claims
-
-		// Check for disagreements within cluster
-		if result.Cluster != nil {
-			e.checkClusterDisagreements(result.Cluster.ID, item.ID, claims)
-		}
-	}
-
-	return result, nil
 }
 
-// checkClusterDisagreements checks for disagreements between this item and others in the cluster
-func (e *Engine) checkClusterDisagreements(clusterID, newItemID string, newClaims []ExtractedClaim) {
-	itemIDs := e.getClusterItemIDs(clusterID)
+// runPeriodicTasks handles DB persistence and pruning.
+func (e *Engine) runPeriodicTasks() {
+	defer e.wg.Done()
 
-	for _, existingID := range itemIDs {
-		if existingID == newItemID {
-			continue
-		}
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
 
-		existingClaims := e.itemClaims[existingID]
-		if len(existingClaims) == 0 {
-			continue
-		}
-
-		// Detect conflicts
-		conflicts := DetectConflicts(newClaims, existingClaims)
-		if len(conflicts) > 0 {
-			e.clusterDisagreements[clusterID] = append(e.clusterDisagreements[clusterID], conflicts...)
+	for {
+		select {
+		case <-e.ctx.Done():
+			return
+		case <-ticker.C:
+			e.persistToDB()
+			e.pruneStaleData()
 		}
 	}
 }
 
-// HasDisagreements returns true if the cluster has detected disagreements
-func (e *Engine) HasDisagreements(clusterID string) bool {
-	return len(e.clusterDisagreements[clusterID]) > 0
-}
-
-// GetDisagreements returns disagreements for a cluster
-func (e *Engine) GetDisagreements(clusterID string) []DisagreementInfo {
-	return e.clusterDisagreements[clusterID]
-}
-
-// ItemHasDisagreement returns true if any cluster containing this item has disagreements
-func (e *Engine) ItemHasDisagreement(itemID string) bool {
-	clusterID, ok := e.itemToCluster[itemID]
-	if !ok {
-		return false
-	}
-	return e.HasDisagreements(clusterID)
-}
-
-// findOrCreateDuplicateGroup finds an existing duplicate group for this item or creates one
-func (e *Engine) findOrCreateDuplicateGroup(item feeds.Item, hash uint64) *DuplicateGroup {
-	// Check against existing hashes for duplicates
-	for existingID, existingHash := range e.itemHashes {
-		if existingID == item.ID {
-			continue
-		}
-		if AreDuplicates(hash, existingHash) {
-			// Found a duplicate! Check if it already has a group
-			if groupID, ok := e.itemToGroup[existingID]; ok {
-				// Add to existing group
-				group := e.duplicateGroups[groupID]
-				if group != nil {
-					group.ItemIDs = append(group.ItemIDs, item.ID)
-					e.itemToGroup[item.ID] = groupID
-					return group
-				}
-			} else {
-				// Create new group with both items
-				groupID := "dup:" + existingID // Use first item's ID as group key
-				group := &DuplicateGroup{
-					ID:         groupID,
-					ItemIDs:    []string{existingID, item.ID},
-					SimHash:    existingHash,
-					DetectedAt: time.Now(),
-				}
-				e.duplicateGroups[groupID] = group
-				e.itemToGroup[existingID] = groupID
-				e.itemToGroup[item.ID] = groupID
-				return group
-			}
-		}
-	}
-	return nil
-}
-
-// GetDuplicateCount returns how many duplicates an item has (0 if none)
-func (e *Engine) GetDuplicateCount(itemID string) int {
-	groupID, ok := e.itemToGroup[itemID]
-	if !ok {
-		return 0
-	}
-	group := e.duplicateGroups[groupID]
-	if group == nil {
-		return 0
-	}
-	// Return total count minus 1 (don't count the item itself)
-	return len(group.ItemIDs) - 1
-}
-
-// GetDuplicates returns all duplicate item IDs for an item
-func (e *Engine) GetDuplicates(itemID string) []string {
-	groupID, ok := e.itemToGroup[itemID]
-	if !ok {
-		return nil
-	}
-	group := e.duplicateGroups[groupID]
-	if group == nil {
-		return nil
-	}
-	// Return all IDs except the queried one
-	var dups []string
-	for _, id := range group.ItemIDs {
-		if id != itemID {
-			dups = append(dups, id)
-		}
-	}
-	return dups
-}
-
-// IsPrimaryInGroup returns true if this is the first (primary) item in its duplicate group
-func (e *Engine) IsPrimaryInGroup(itemID string) bool {
-	groupID, ok := e.itemToGroup[itemID]
-	if !ok {
-		return true // No group, so it's "primary" by default
-	}
-	group := e.duplicateGroups[groupID]
-	if group == nil || len(group.ItemIDs) == 0 {
-		return true
-	}
-	return group.ItemIDs[0] == itemID
-}
-
-// GetItemEntities returns entities for an item from cache
-func (e *Engine) GetItemEntities(itemID string) []ItemEntity {
-	return e.itemEntities[itemID]
-}
-
-// findOrCreateCluster finds or creates a cluster for this item
-// Clustering criteria: entity overlap >50% OR title similarity >0.7
-func (e *Engine) findOrCreateCluster(item feeds.Item, entities []ItemEntity, hash uint64) *Cluster {
-	// Build entity set for this item
-	entitySet := make(map[string]bool)
-	for _, ent := range entities {
-		entitySet[ent.EntityID] = true
-	}
-
-	// Check existing clusters for a match
-	var bestCluster *Cluster
-	var bestScore float64
-
-	for _, cluster := range e.clusters {
-		// Skip stale clusters
-		if cluster.Status == ClusterStale {
-			continue
-		}
-
-		// Check if any items in this cluster match
-		for _, clusterItemID := range e.getClusterItemIDs(cluster.ID) {
-			// Check title similarity
-			if existingHash, ok := e.itemHashes[clusterItemID]; ok {
-				sim := SimilarityScore(hash, existingHash)
-				if sim > 0.7 && sim > bestScore {
-					bestScore = sim
-					bestCluster = cluster
-				}
-			}
-
-			// Check entity overlap
-			existingEntities := e.itemEntities[clusterItemID]
-			if len(existingEntities) > 0 && len(entities) > 0 {
-				overlap := e.calculateEntityOverlap(entitySet, existingEntities)
-				if overlap > 0.5 && overlap > bestScore {
-					bestScore = overlap
-					bestCluster = cluster
-				}
-			}
-		}
-	}
-
-	// If found a matching cluster, add this item
-	if bestCluster != nil {
-		e.itemToCluster[item.ID] = bestCluster.ID
-		bestCluster.ItemCount++
-		bestCluster.LastItemAt = item.Published
-		// Update velocity (items per hour)
-		hours := time.Since(bestCluster.FirstItemAt).Hours()
-		if hours > 0 {
-			bestCluster.Velocity = float64(bestCluster.ItemCount) / hours
-		}
-		return bestCluster
-	}
-
-	// Create a new cluster if we have enough signal
-	if len(entities) >= 2 {
-		clusterID := "cluster:" + item.ID
-		cluster := &Cluster{
-			ID:          clusterID,
-			EventSummary: item.Title,
-			FirstItemAt: item.Published,
-			LastItemAt:  item.Published,
-			ItemCount:   1,
-			SourceCount: 1,
-			Status:      ClusterActive,
-			Velocity:    0,
-		}
-		e.clusters[clusterID] = cluster
-		e.itemToCluster[item.ID] = clusterID
-		return cluster
-	}
-
-	return nil
-}
-
-// getClusterItemIDs returns all item IDs in a cluster
-func (e *Engine) getClusterItemIDs(clusterID string) []string {
-	var items []string
-	for itemID, cID := range e.itemToCluster {
-		if cID == clusterID {
-			items = append(items, itemID)
-		}
-	}
-	return items
-}
-
-// calculateEntityOverlap calculates Jaccard similarity between entity sets
-func (e *Engine) calculateEntityOverlap(set1 map[string]bool, entities2 []ItemEntity) float64 {
-	set2 := make(map[string]bool)
-	for _, ent := range entities2 {
-		set2[ent.EntityID] = true
-	}
-
-	// Calculate intersection and union
-	intersection := 0
-	for id := range set1 {
-		if set2[id] {
-			intersection++
-		}
-	}
-
-	union := len(set1)
-	for id := range set2 {
-		if !set1[id] {
-			union++
-		}
-	}
-
-	if union == 0 {
-		return 0
-	}
-	return float64(intersection) / float64(union)
-}
-
-// GetClusterInfo returns cluster info for an item
-func (e *Engine) GetClusterInfo(itemID string) *Cluster {
-	clusterID, ok := e.itemToCluster[itemID]
-	if !ok {
-		return nil
-	}
-	return e.clusters[clusterID]
-}
-
-// IsClusterPrimary returns true if this item is the primary in its cluster
-func (e *Engine) IsClusterPrimary(itemID string) bool {
-	clusterID, ok := e.itemToCluster[itemID]
-	if !ok {
-		return false
-	}
-	cluster := e.clusters[clusterID]
-	if cluster == nil {
-		return false
-	}
-	// Primary is the first item that created the cluster
-	return strings.HasSuffix(cluster.ID, itemID)
-}
-
-// ProcessItems processes multiple items in batch
-func (e *Engine) ProcessItems(items []feeds.Item) {
-	if len(items) == 0 {
+// persistToDB writes cached data to SQLite.
+func (e *Engine) persistToDB() {
+	if e.db == nil {
 		return
 	}
 
-	// Initialize stats start time if not set
-	if e.stats.StartTime.IsZero() {
-		e.stats.StartTime = time.Now()
-	}
-
-	logging.Info("CORRELATION: Processing batch", "item_count", len(items))
-
-	entitiesFound := 0
-	clustersCreated := 0
-	var sampleEntities []string
-
-	for _, item := range items {
-		result, _ := e.ProcessItem(item)
-		e.stats.ItemsProcessed++
-		if result != nil {
-			if len(result.Entities) > 0 {
-				entitiesFound++
-				// Capture sample entities for debugging
-				if len(sampleEntities) < 5 {
-					for _, ent := range result.Entities {
-						sampleEntities = append(sampleEntities, ent.EntityID)
-						if len(sampleEntities) >= 5 {
-							break
-						}
-					}
-				}
-			}
-			if result.Cluster != nil {
-				clustersCreated++
-			}
+	// Batch persist entities
+	e.entityCache.Range(func(key, value interface{}) bool {
+		itemID := key.(string)
+		entities := value.([]Entity)
+		for _, ent := range entities {
+			_, _ = e.db.Exec(`
+				INSERT OR IGNORE INTO item_entities (item_id, entity_id, salience)
+				VALUES (?, ?, ?)
+			`, itemID, ent.ID, ent.Salience)
 		}
-	}
+		return true
+	})
 
-	logging.Info("CORRELATION: Batch complete",
-		"items_processed", len(items),
-		"items_with_entities", entitiesFound,
-		"items_with_clusters", clustersCreated,
-		"total_clusters", len(e.clusters),
-		"sample_entities", sampleEntities)
-
-	// After processing batch, update velocity snapshots
-	e.updateVelocitySnapshots()
+	logging.Debug("Correlation data persisted to DB")
 }
 
-// updateVelocitySnapshots creates velocity snapshots for active clusters
-func (e *Engine) updateVelocitySnapshots() {
-	now := time.Now()
-	oneHourAgo := now.Add(-time.Hour)
-	oneDayAgo := now.Add(-24 * time.Hour)
+// pruneStaleData removes old data from memory.
+func (e *Engine) pruneStaleData() {
+	// TODO: Implement pruning of old clusters, velocity data, etc.
+}
 
-	for clusterID, cluster := range e.clusters {
-		if cluster.Status == ClusterStale {
-			continue
-		}
-
-		// Count items in last hour and last 24 hours
-		itemIDs := e.getClusterItemIDs(clusterID)
-		mentions1h := 0
-		mentions24h := 0
-
-		for _, itemID := range itemIDs {
-			hash := e.itemHashes[itemID]
-			_ = hash // We'd need item timestamps; for now use cluster times
-
-			// Simple approximation: if cluster last item is within time window
-			if cluster.LastItemAt.After(oneHourAgo) {
-				mentions1h++
-			}
-			if cluster.LastItemAt.After(oneDayAgo) {
-				mentions24h++
-			}
-		}
-
-		// Calculate velocity trend
-		var velocity float64
-		if len(e.clusterHistory[clusterID]) > 0 {
-			lastSnapshot := e.clusterHistory[clusterID][len(e.clusterHistory[clusterID])-1]
-			velocity = float64(cluster.ItemCount-lastSnapshot.Mentions24h) / time.Since(lastSnapshot.SnapshotAt).Hours()
-		}
-
-		snapshot := VelocitySnapshot{
-			ClusterID:   clusterID,
-			SnapshotAt:  now,
-			Mentions1h:  mentions1h,
-			Mentions24h: cluster.ItemCount,
-			Velocity:    velocity,
-		}
-
-		// Keep last 24 snapshots (one per hour for a day)
-		history := e.clusterHistory[clusterID]
-		history = append(history, snapshot)
-		if len(history) > 24 {
-			history = history[len(history)-24:]
-		}
-		e.clusterHistory[clusterID] = history
-
-		// Update cluster velocity
-		cluster.Velocity = velocity
-
-		// Check if cluster should be marked stale
-		if time.Since(cluster.LastItemAt) > 6*time.Hour {
-			cluster.Status = ClusterStale
-		}
+// ProcessItem is the entry point (non-blocking).
+// Items are sent to the pipeline and processed asynchronously.
+func (e *Engine) ProcessItem(item *feeds.Item) {
+	select {
+	case e.bus.items <- item:
+	default:
+		// Backpressure - drop
+		logging.Debug("Pipeline backpressure, dropping item", "id", item.ID)
 	}
 }
 
-// GetClusterVelocityTrend returns the velocity trend for a cluster
-func (e *Engine) GetClusterVelocityTrend(clusterID string) VelocityTrend {
-	cluster := e.clusters[clusterID]
-	if cluster == nil {
-		return TrendSteady
+// ProcessItems processes multiple items (non-blocking).
+func (e *Engine) ProcessItems(items []feeds.Item) {
+	for i := range items {
+		e.ProcessItem(&items[i])
 	}
-
-	if cluster.Velocity > 5 {
-		return TrendSpiking
-	} else if cluster.Velocity > 1 {
-		return TrendSteady
-	}
-	return TrendFading
+	logging.Info("Correlation: queued items for processing", "count", len(items))
 }
 
-// GetClusterSparklineData returns normalized velocity values for sparkline rendering
-func (e *Engine) GetClusterSparklineData(clusterID string, points int) []float64 {
-	history := e.clusterHistory[clusterID]
-	if len(history) == 0 {
-		return nil
-	}
-
-	// Normalize to 0-1 range
-	var maxVal float64
-	for _, s := range history {
-		if float64(s.Mentions1h) > maxVal {
-			maxVal = float64(s.Mentions1h)
-		}
-	}
-	if maxVal == 0 {
-		maxVal = 1
-	}
-
-	// Sample to requested number of points
-	result := make([]float64, points)
-	step := float64(len(history)) / float64(points)
-
-	for i := 0; i < points; i++ {
-		idx := int(float64(i) * step)
-		if idx >= len(history) {
-			idx = len(history) - 1
-		}
-		result[i] = float64(history[idx].Mentions1h) / maxVal
-	}
-
-	return result
+// Results returns the event channel for Bubble Tea subscription.
+func (e *Engine) Results() <-chan CorrelationEvent {
+	return e.bus.Results
 }
 
-// ClusterSummary holds summary info for radar display
-type ClusterSummary struct {
-	ID          string
-	Summary     string
-	ItemCount   int
-	Velocity    float64
-	Trend       VelocityTrend
-	HasConflict bool
-	FirstItemAt time.Time
+// ===== UI Query Methods (all use caches - instant) =====
+
+// GetDuplicateCount returns the number of duplicates for an item.
+func (e *Engine) GetDuplicateCount(itemID string) int {
+	return e.dedup.GetGroupSize(itemID)
 }
 
-// GetActiveClusters returns active clusters sorted by velocity (for radar display)
+// IsPrimaryInGroup returns true if this is the primary item in its duplicate group.
+func (e *Engine) IsPrimaryInGroup(itemID string) bool {
+	return e.dedup.IsPrimary(itemID)
+}
+
+// GetDuplicates returns all duplicate item IDs for an item.
+func (e *Engine) GetDuplicates(itemID string) []string {
+	return e.dedup.GetDuplicates(itemID)
+}
+
+// GetItemEntities returns entities for an item (from cache).
+func (e *Engine) GetItemEntities(itemID string) []Entity {
+	if v, ok := e.entityCache.Load(itemID); ok {
+		return v.([]Entity)
+	}
+	return nil
+}
+
+// GetClusterInfo returns cluster info for an item.
+func (e *Engine) GetClusterInfo(itemID string) *Cluster {
+	return e.clusters.GetCluster(itemID)
+}
+
+// IsClusterPrimary returns true if this item is the primary in its cluster.
+func (e *Engine) IsClusterPrimary(itemID string) bool {
+	return e.clusters.IsClusterPrimary(itemID)
+}
+
+// GetSparkline returns velocity sparkline data for a cluster.
+func (e *Engine) GetSparkline(clusterID string) []float64 {
+	return e.velocity.GetSparkline(clusterID, 8)
+}
+
+// Stats returns engine statistics.
+func (e *Engine) Stats() (items, groups, clusters int) {
+	items, groups = e.dedup.Stats()
+	clusters, _ = e.clusters.Stats()
+	return
+}
+
+// GetStats returns detailed statistics for UI display.
+func (e *Engine) GetStats() Stats {
+	items, groups := e.dedup.Stats()
+	clusters, _ := e.clusters.Stats()
+	return Stats{
+		ItemsProcessed:  items,
+		DuplicatesFound: groups,
+		ClustersFormed:  clusters,
+	}
+}
+
+// GetActiveClusters returns active clusters sorted by velocity (for radar display).
 func (e *Engine) GetActiveClusters(limit int) []ClusterSummary {
+	allClusters := e.clusters.GetAllClusters()
 	var summaries []ClusterSummary
 
-	for id, cluster := range e.clusters {
-		if cluster.Status == ClusterStale {
+	for _, cluster := range allClusters {
+		// Skip tiny clusters
+		if cluster.Size < 2 {
 			continue
 		}
 
 		summary := ClusterSummary{
-			ID:          id,
-			Summary:     cluster.EventSummary,
-			ItemCount:   cluster.ItemCount,
-			Velocity:    cluster.Velocity,
-			Trend:       e.GetClusterVelocityTrend(id),
-			HasConflict: e.HasDisagreements(id),
-			FirstItemAt: cluster.FirstItemAt,
+			ID:          cluster.ID,
+			Summary:     cluster.Title,
+			ItemCount:   cluster.Size,
+			Velocity:    e.velocity.GetVelocity(cluster.ID),
+			Trend:       e.GetClusterVelocityTrend(cluster.ID),
+			HasConflict: false, // TODO: implement disagreement tracking
+			FirstItemAt: cluster.CreatedAt,
 		}
 		summaries = append(summaries, summary)
 	}
@@ -797,241 +308,119 @@ func (e *Engine) GetActiveClusters(limit int) []ClusterSummary {
 	return summaries
 }
 
-// ItemCorrelations holds all correlation data for an item
-type ItemCorrelations struct {
-	Item           feeds.Item
-	Entities       []ItemEntity
-	RelatedItems   []feeds.Item
-	Correlations   []Correlation
-	DuplicateGroup *DuplicateGroup
-	Cluster        *Cluster
-}
-
-func (e *Engine) storeEntities(item feeds.Item, entities []ItemEntity) error {
-	tx, err := e.db.Begin()
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-
-	for _, ie := range entities {
-		// Upsert entity
-		_, err := tx.Exec(`
-			INSERT INTO entities (id, name, type, first_seen, last_seen, mentions)
-			VALUES (?, ?, ?, ?, ?, 1)
-			ON CONFLICT(id) DO UPDATE SET
-				last_seen = excluded.last_seen,
-				mentions = mentions + 1
-		`, ie.EntityID, ie.EntityID, "unknown", item.Published, item.Published)
-		if err != nil {
-			continue
-		}
-
-		// Link to item
-		_, err = tx.Exec(`
-			INSERT OR REPLACE INTO item_entities (item_id, entity_id, context, salience)
-			VALUES (?, ?, ?, ?)
-		`, item.ID, ie.EntityID, ie.Context, ie.Salience)
-		if err != nil {
-			continue
-		}
-	}
-
-	return tx.Commit()
-}
-
-func (e *Engine) findRelatedItems(item feeds.Item, entities []ItemEntity) ([]feeds.Item, error) {
-	if len(entities) == 0 {
-		// Fall back to text similarity search
-		return e.findByTextSimilarity(item)
-	}
-
-	// Find items sharing entities
-	entityIDs := make([]string, len(entities))
-	for i, ent := range entities {
-		entityIDs[i] = ent.EntityID
-	}
-
-	placeholders := strings.Repeat("?,", len(entityIDs))
-	placeholders = placeholders[:len(placeholders)-1]
-
-	query := `
-		SELECT DISTINCT i.id, i.source_type, i.source_name, i.title, i.summary,
-		       i.url, i.author, i.published_at, i.fetched_at
-		FROM items i
-		JOIN item_entities ie ON i.id = ie.item_id
-		WHERE ie.entity_id IN (` + placeholders + `)
-		  AND i.id != ?
-		ORDER BY i.published_at DESC
-		LIMIT 20
-	`
-
-	args := make([]interface{}, len(entityIDs)+1)
-	for i, id := range entityIDs {
-		args[i] = id
-	}
-	args[len(entityIDs)] = item.ID
-
-	rows, err := e.db.Query(query, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var items []feeds.Item
-	for rows.Next() {
-		var it feeds.Item
-		var sourceType string
-		err := rows.Scan(&it.ID, &sourceType, &it.SourceName, &it.Title,
-			&it.Summary, &it.URL, &it.Author, &it.Published, &it.Fetched)
-		if err != nil {
-			continue
-		}
-		it.Source = feeds.SourceType(sourceType)
-		items = append(items, it)
-	}
-
-	return items, nil
-}
-
-func (e *Engine) findByTextSimilarity(item feeds.Item) ([]feeds.Item, error) {
-	// Simple keyword extraction from title
-	words := strings.Fields(strings.ToLower(item.Title))
-	var keywords []string
-	for _, w := range words {
-		if len(w) > 4 { // Skip short words
-			keywords = append(keywords, w)
-		}
-	}
-
-	if len(keywords) == 0 {
-		return nil, nil
-	}
-
-	// Build LIKE query for keywords
-	var conditions []string
-	var args []interface{}
-	for _, kw := range keywords[:min(5, len(keywords))] {
-		conditions = append(conditions, "LOWER(title) LIKE ?")
-		args = append(args, "%"+kw+"%")
-	}
-	args = append(args, item.ID)
-
-	query := `
-		SELECT id, source_type, source_name, title, summary, url, author, published_at, fetched_at
-		FROM items
-		WHERE (` + strings.Join(conditions, " OR ") + `)
-		  AND id != ?
-		ORDER BY published_at DESC
-		LIMIT 10
-	`
-
-	rows, err := e.db.Query(query, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var items []feeds.Item
-	for rows.Next() {
-		var it feeds.Item
-		var sourceType string
-		err := rows.Scan(&it.ID, &sourceType, &it.SourceName, &it.Title,
-			&it.Summary, &it.URL, &it.Author, &it.Published, &it.Fetched)
-		if err != nil {
-			continue
-		}
-		it.Source = feeds.SourceType(sourceType)
-		items = append(items, it)
-	}
-
-	return items, nil
-}
-
-func (e *Engine) storeCorrelations(correlations []Correlation) error {
-	// TODO: Implement correlation storage
-	return nil
-}
-
-// GetEntityTimeline returns all items mentioning an entity, chronologically
-func (e *Engine) GetEntityTimeline(entityID string) ([]feeds.Item, error) {
-	query := `
-		SELECT i.id, i.source_type, i.source_name, i.title, i.summary,
-		       i.url, i.author, i.published_at, i.fetched_at
-		FROM items i
-		JOIN item_entities ie ON i.id = ie.item_id
-		WHERE ie.entity_id = ?
-		ORDER BY i.published_at ASC
-	`
-
-	rows, err := e.db.Query(query, entityID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var items []feeds.Item
-	for rows.Next() {
-		var it feeds.Item
-		var sourceType string
-		err := rows.Scan(&it.ID, &sourceType, &it.SourceName, &it.Title,
-			&it.Summary, &it.URL, &it.Author, &it.Published, &it.Fetched)
-		if err != nil {
-			continue
-		}
-		it.Source = feeds.SourceType(sourceType)
-		items = append(items, it)
-	}
-
-	return items, nil
-}
-
-// GetTopEntities returns most-mentioned entities in a time range
+// GetTopEntities returns most-mentioned entities in a time range.
 func (e *Engine) GetTopEntities(since time.Time, limit int) ([]Entity, error) {
-	query := `
-		SELECT e.id, e.name, e.type, e.first_seen, e.last_seen,
-		       COUNT(ie.item_id) as recent_mentions
-		FROM entities e
-		JOIN item_entities ie ON e.id = ie.entity_id
-		JOIN items i ON ie.item_id = i.id
-		WHERE i.published_at > ?
-		GROUP BY e.id
-		ORDER BY recent_mentions DESC
-		LIMIT ?
-	`
+	// Count entity mentions from cache
+	counts := make(map[string]int)
+	names := make(map[string]Entity)
 
-	rows, err := e.db.Query(query, since, limit)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var entities []Entity
-	for rows.Next() {
-		var ent Entity
-		var mentions int
-		err := rows.Scan(&ent.ID, &ent.Name, &ent.Type, &ent.FirstSeen, &ent.LastSeen, &mentions)
-		if err != nil {
-			continue
+	e.entityCache.Range(func(key, value interface{}) bool {
+		entities := value.([]Entity)
+		for _, ent := range entities {
+			counts[ent.ID]++
+			names[ent.ID] = ent
 		}
-		ent.Mentions = mentions
-		entities = append(entities, ent)
+		return true
+	})
+
+	// Convert to slice and sort
+	type entityCount struct {
+		entity Entity
+		count  int
+	}
+	var sorted []entityCount
+	for id, count := range counts {
+		ent := names[id]
+		sorted = append(sorted, entityCount{ent, count})
 	}
 
-	return entities, nil
+	// Sort by count descending
+	for i := 0; i < len(sorted)-1; i++ {
+		for j := i + 1; j < len(sorted); j++ {
+			if sorted[j].count > sorted[i].count {
+				sorted[i], sorted[j] = sorted[j], sorted[i]
+			}
+		}
+	}
+
+	// Return top N
+	var result []Entity
+	for i := 0; i < len(sorted) && i < limit; i++ {
+		result = append(result, sorted[i].entity)
+	}
+
+	return result, nil
 }
 
-
-func min(a, b int) int {
-	if a < b {
-		return a
+// GetClusterVelocityTrend returns the velocity trend for a cluster.
+func (e *Engine) GetClusterVelocityTrend(clusterID string) VelocityTrend {
+	velocity := e.velocity.GetVelocity(clusterID)
+	if velocity > 5 {
+		return TrendSpiking
+	} else if velocity > 1 {
+		return TrendSteady
 	}
-	return b
+	return TrendFading
 }
 
-func truncateTitle(s string, maxLen int) string {
-	if len(s) <= maxLen {
-		return s
+// GetClusterSparklineData returns normalized velocity values for sparkline rendering.
+func (e *Engine) GetClusterSparklineData(clusterID string, points int) []float64 {
+	return e.velocity.GetSparkline(clusterID, points)
+}
+
+// ItemHasDisagreement returns true if any cluster containing this item has disagreements.
+func (e *Engine) ItemHasDisagreement(itemID string) bool {
+	// TODO: Implement disagreement tracking
+	return false
+}
+
+// Activity tracking for transparency
+var (
+	recentActivity []Activity
+	activityIndex  int
+	activityMu     sync.Mutex
+)
+
+const maxActivityEntries = 50
+
+// addActivity adds an activity to the ring buffer.
+func addActivity(actType ActivityType, itemTitle, details string) {
+	activityMu.Lock()
+	defer activityMu.Unlock()
+
+	if recentActivity == nil {
+		recentActivity = make([]Activity, maxActivityEntries)
 	}
-	return s[:maxLen-3] + "..."
+	recentActivity[activityIndex] = Activity{
+		Type:      actType,
+		Time:      time.Now(),
+		ItemTitle: itemTitle,
+		Details:   details,
+	}
+	activityIndex = (activityIndex + 1) % maxActivityEntries
+}
+
+// GetRecentActivity returns recent activities (newest first).
+func (e *Engine) GetRecentActivity(count int) []Activity {
+	activityMu.Lock()
+	defer activityMu.Unlock()
+
+	if recentActivity == nil {
+		return nil
+	}
+	if count > maxActivityEntries {
+		count = maxActivityEntries
+	}
+
+	result := make([]Activity, 0, count)
+	idx := (activityIndex - 1 + maxActivityEntries) % maxActivityEntries
+	for i := 0; i < count; i++ {
+		act := recentActivity[idx]
+		if act.Time.IsZero() {
+			break
+		}
+		result = append(result, act)
+		idx = (idx - 1 + maxActivityEntries) % maxActivityEntries
+	}
+	return result
 }

@@ -7,43 +7,11 @@
 // without deciding what matters. It extracts structure from text,
 // finds relationships between items, and surfaces patterns—all
 // transparently, all optional, all user-controlled.
-//
-// See CORRELATION_ENGINE.md for full design documentation.
 package correlation
 
 import (
 	"time"
 )
-
-// ClusterStatus indicates the lifecycle state of a story cluster
-type ClusterStatus string
-
-const (
-	ClusterActive   ClusterStatus = "active"   // Still developing
-	ClusterStale    ClusterStatus = "stale"    // No updates in a while
-	ClusterResolved ClusterStatus = "resolved" // Story concluded
-)
-
-// Cluster represents a group of items about the same event/story
-type Cluster struct {
-	ID           string        `json:"id"`
-	EventSummary string        `json:"event_summary"` // "Boeing 737 MAX grounding extends"
-	EventType    string        `json:"event_type"`    // announcement, incident, statement
-	FirstItemAt  time.Time     `json:"first_item_at"`
-	LastItemAt   time.Time     `json:"last_item_at"`
-	ItemCount    int           `json:"item_count"`
-	SourceCount  int           `json:"source_count"`
-	Status       ClusterStatus `json:"status"`
-	Velocity     float64       `json:"velocity"` // Items per hour
-}
-
-// ClusterItem links an item to a cluster
-type ClusterItem struct {
-	ClusterID  string    `json:"cluster_id"`
-	ItemID     string    `json:"item_id"`
-	AddedAt    time.Time `json:"added_at"`
-	Confidence float64   `json:"confidence"`
-}
 
 // ClaimType describes the nature of a claim
 type ClaimType string
@@ -88,16 +56,6 @@ type Disagreement struct {
 	DetectedAt       time.Time        `json:"detected_at"`
 }
 
-// VelocitySnapshot tracks activity over time
-type VelocitySnapshot struct {
-	EntityID    string    `json:"entity_id,omitempty"`
-	ClusterID   string    `json:"cluster_id,omitempty"`
-	SnapshotAt  time.Time `json:"snapshot_at"`
-	Mentions1h  int       `json:"mentions_1h"`
-	Mentions24h int       `json:"mentions_24h"`
-	Velocity    float64   `json:"velocity"` // Trend direction
-}
-
 // VelocityTrend indicates direction of activity
 type VelocityTrend string
 
@@ -119,4 +77,51 @@ type DuplicateGroup struct {
 type SourceAttribution struct {
 	OriginalSource string `json:"original_source,omitempty"`
 	IsAggregation  bool   `json:"is_aggregation"`
+}
+
+// ItemEntity links items to entities (used by cheap extractor)
+type ItemEntity struct {
+	ItemID   string
+	EntityID string
+	Context  string  // The sentence/phrase where entity appeared
+	Salience float64 // How important is this entity to the item (0-1)
+}
+
+// ActivityType represents a type of correlation activity
+type ActivityType string
+
+const (
+	ActivityExtract   ActivityType = "extract"
+	ActivityCluster   ActivityType = "cluster"
+	ActivityDuplicate ActivityType = "duplicate"
+	ActivityDisagree  ActivityType = "disagree"
+)
+
+// Activity represents a single correlation engine action
+type Activity struct {
+	Type      ActivityType
+	Time      time.Time
+	ItemTitle string
+	Details   string // e.g., "found: US, China, Trade" or "joined cluster with 5 items"
+}
+
+// Stats holds correlation engine statistics
+type Stats struct {
+	ItemsProcessed     int
+	EntitiesFound      int
+	ClustersFormed     int
+	DuplicatesFound    int
+	DisagreementsFound int
+	StartTime          time.Time
+}
+
+// ClusterSummary holds summary info for radar display
+type ClusterSummary struct {
+	ID          string
+	Summary     string
+	ItemCount   int
+	Velocity    float64
+	Trend       VelocityTrend
+	HasConflict bool
+	FirstItemAt time.Time
 }

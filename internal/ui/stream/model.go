@@ -639,7 +639,7 @@ func (m Model) getFilteredItems() []feeds.Item {
 			// Check if item has this entity
 			entities := m.correlationEngine.GetItemEntities(item.ID)
 			for _, e := range entities {
-				if e.EntityID == m.filterEntityID {
+				if e.ID == m.filterEntityID {
 					filtered = append(filtered, item)
 					break
 				}
@@ -1211,7 +1211,7 @@ func (m Model) renderItem(item feeds.Item, selected bool) string {
 	clusterIndicator := ""
 	if m.correlationEngine != nil {
 		if cluster := m.correlationEngine.GetClusterInfo(item.ID); cluster != nil {
-			if m.correlationEngine.IsClusterPrimary(item.ID) && cluster.ItemCount > 1 {
+			if m.correlationEngine.IsClusterPrimary(item.ID) && cluster.Size > 1 {
 				// Base indicator
 				indicatorStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#58a6ff"))
 
@@ -1224,17 +1224,17 @@ func (m Model) renderItem(item feeds.Item, selected bool) string {
 					sparkData := m.correlationEngine.GetClusterSparklineData(cluster.ID, 5)
 					if len(sparkData) > 0 {
 						spark := renderSparkline(sparkData, 5)
-						clusterIndicator = indicatorStyle.Render(fmt.Sprintf(" 🔥◐%d %s", cluster.ItemCount, spark))
+						clusterIndicator = indicatorStyle.Render(fmt.Sprintf(" 🔥◐%d %s", cluster.Size, spark))
 					} else {
-						clusterIndicator = indicatorStyle.Render(fmt.Sprintf(" 🔥◐%d", cluster.ItemCount))
+						clusterIndicator = indicatorStyle.Render(fmt.Sprintf(" 🔥◐%d", cluster.Size))
 					}
 				case correlation.TrendSteady:
-					clusterIndicator = indicatorStyle.Render(fmt.Sprintf(" ◐%d", cluster.ItemCount))
+					clusterIndicator = indicatorStyle.Render(fmt.Sprintf(" ◐%d", cluster.Size))
 				case correlation.TrendFading:
 					indicatorStyle = indicatorStyle.Foreground(lipgloss.Color("#8b949e"))
-					clusterIndicator = indicatorStyle.Render(fmt.Sprintf(" ◐%d", cluster.ItemCount))
+					clusterIndicator = indicatorStyle.Render(fmt.Sprintf(" ◐%d", cluster.Size))
 				default:
-					clusterIndicator = indicatorStyle.Render(fmt.Sprintf(" ◐%d", cluster.ItemCount))
+					clusterIndicator = indicatorStyle.Render(fmt.Sprintf(" ◐%d", cluster.Size))
 				}
 			}
 		}
@@ -1493,12 +1493,12 @@ func (m Model) renderSelectedItem(item feeds.Item, sourceBadge, title, timeStr, 
 			var pills []string
 			seen := make(map[string]bool)
 			for _, ent := range entities {
-				if seen[ent.EntityID] || len(pills) >= 5 {
+				if seen[ent.ID] || len(pills) >= 5 {
 					continue
 				}
-				seen[ent.EntityID] = true
+				seen[ent.ID] = true
 
-				pill := m.renderEntityPill(ent.EntityID, selectionBg)
+				pill := m.renderEntityPill(ent.ID, selectionBg)
 				if pill != "" {
 					pills = append(pills, pill)
 				}
