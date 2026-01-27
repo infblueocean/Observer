@@ -689,6 +689,11 @@ func (m *Model) MarkSelectedRead() {
 	}
 }
 
+// ItemCount returns the number of items currently displayed in the stream
+func (m *Model) ItemCount() int {
+	return len(m.items)
+}
+
 // Spinner returns the spinner model
 func (m Model) Spinner() spinner.Model {
 	return m.spinner

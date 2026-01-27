@@ -68,9 +68,9 @@ func (o *OpenAIProvider) Generate(ctx context.Context, req Request) (Response, e
 	})
 
 	body := map[string]interface{}{
-		"model":      o.model,
-		"max_tokens": maxTokens,
-		"messages":   messages,
+		"model":                o.model,
+		"max_completion_tokens": maxTokens,
+		"messages":             messages,
 	}
 
 	jsonBody, err := json.Marshal(body)

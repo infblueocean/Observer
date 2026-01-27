@@ -1252,9 +1252,19 @@ func (m Model) View() string {
 		sourceIndicator = fmt.Sprintf("%d sources", m.aggregator.SourceCount())
 	}
 
-	headerText := fmt.Sprintf("◉ OBSERVER  │  %s  │  %d items",
+	// Show sampled/total items (sampled = what's displayed, total = in DB)
+	sampledCount := m.stream.ItemCount()
+	totalCount := m.aggregator.ItemCount()
+	var itemsIndicator string
+	if sampledCount < totalCount {
+		itemsIndicator = fmt.Sprintf("%d/%d items", sampledCount, totalCount)
+	} else {
+		itemsIndicator = fmt.Sprintf("%d items", totalCount)
+	}
+
+	headerText := fmt.Sprintf("◉ OBSERVER  │  %s  │  %s",
 		sourceIndicator,
-		m.aggregator.ItemCount())
+		itemsIndicator)
 	if blocked > 0 {
 		headerText += fmt.Sprintf("  │  %d blocked", blocked)
 	}
