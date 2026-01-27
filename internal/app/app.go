@@ -484,9 +484,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case BrainTrustAnalysisMsg:
 		// Update AI Analysis panel with new analysis
-		if item := m.stream.SelectedItem(); item != nil && item.ID == msg.ItemID {
+		// Use ItemID and ItemTitle from the message (captured at request time)
+		// to avoid issues when feed updates change the cursor position
+		if m.brainTrustPanel.GetItemID() == msg.ItemID {
 			analysis := m.brainTrust.GetAnalysis(msg.ItemID)
-			m.brainTrustPanel.SetAnalysis(msg.ItemID, item.Title, analysis)
+			m.brainTrustPanel.SetAnalysis(msg.ItemID, msg.ItemTitle, analysis)
 			m.showBrainTrust = true
 		}
 		return m, nil
@@ -1451,15 +1453,17 @@ func (m Model) analyzeBrainTrust(item feeds.Item) tea.Cmd {
 				if analysis != nil && !analysis.Loading {
 					logging.Debug("AI analysis complete", "item", item.ID)
 					return BrainTrustAnalysisMsg{
-						ItemID:   item.ID,
-						Analysis: *analysis,
+						ItemID:    item.ID,
+						ItemTitle: item.Title,
+						Analysis:  *analysis,
 					}
 				}
 			case <-timeout:
 				logging.Warn("AI analysis timed out", "item", item.Title)
 				return BrainTrustAnalysisMsg{
-					ItemID:   item.ID,
-					Analysis: brain.Analysis{Error: fmt.Errorf("analysis timed out")},
+					ItemID:    item.ID,
+					ItemTitle: item.Title,
+					Analysis:  brain.Analysis{Error: fmt.Errorf("analysis timed out")},
 				}
 			}
 		}
@@ -1490,15 +1494,17 @@ func (m Model) analyzeBrainTrustRandom(item feeds.Item) tea.Cmd {
 				if analysis != nil && !analysis.Loading {
 					logging.Debug("AI analysis complete (random provider)", "item", item.ID)
 					return BrainTrustAnalysisMsg{
-						ItemID:   item.ID,
-						Analysis: *analysis,
+						ItemID:    item.ID,
+						ItemTitle: item.Title,
+						Analysis:  *analysis,
 					}
 				}
 			case <-timeout:
 				logging.Warn("AI analysis timed out", "item", item.Title)
 				return BrainTrustAnalysisMsg{
-					ItemID:   item.ID,
-					Analysis: brain.Analysis{Error: fmt.Errorf("analysis timed out")},
+					ItemID:    item.ID,
+					ItemTitle: item.Title,
+					Analysis:  brain.Analysis{Error: fmt.Errorf("analysis timed out")},
 				}
 			}
 		}
@@ -1526,15 +1532,17 @@ func (m Model) analyzeBrainTrustLocal(item feeds.Item) tea.Cmd {
 				if analysis != nil && !analysis.Loading {
 					logging.Debug("Local AI analysis complete", "item", item.ID)
 					return BrainTrustAnalysisMsg{
-						ItemID:   item.ID,
-						Analysis: *analysis,
+						ItemID:    item.ID,
+						ItemTitle: item.Title,
+						Analysis:  *analysis,
 					}
 				}
 			case <-timeout:
 				logging.Warn("Local AI analysis timed out", "item", item.Title)
 				return BrainTrustAnalysisMsg{
-					ItemID:   item.ID,
-					Analysis: brain.Analysis{Error: fmt.Errorf("local analysis timed out")},
+					ItemID:    item.ID,
+					ItemTitle: item.Title,
+					Analysis:  brain.Analysis{Error: fmt.Errorf("local analysis timed out")},
 				}
 			}
 		}

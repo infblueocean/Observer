@@ -23,8 +23,9 @@ type TickMsg struct{}
 
 // BrainTrustAnalysisMsg is sent when a Brain Trust analysis completes
 type BrainTrustAnalysisMsg struct {
-	ItemID   string
-	Analysis brain.Analysis
+	ItemID    string
+	ItemTitle string // Stored at request time to survive feed updates
+	Analysis  brain.Analysis
 }
 
 // TopStoriesMsg is sent when AI top stories analysis completes
