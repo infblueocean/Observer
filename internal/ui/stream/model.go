@@ -126,9 +126,21 @@ func bandLabel(band timeBand) string {
 // interleaveWithinBands reorders items so sources are spread evenly within each time band
 // Instead of: [A1, A2, A3, B1, B2, C1] (chronological clusters)
 // Produces:   [A1, B1, C1, A2, B2, A3] (interleaved by source)
+// Also caps chatty sources to maxPerSourcePerBand items per time band to ensure diversity
 func interleaveWithinBands(items []feeds.Item) []feeds.Item {
 	if len(items) == 0 {
 		return items
+	}
+
+	// Max items per source per time band - prevents SEC, Nikkei, etc from dominating
+	// "Just Now" and "Past Hour" get more since they're breaking news
+	// Older bands get fewer since we want recent diversity
+	maxPerSourceByBand := map[timeBand]int{
+		bandJustNow:    8,  // Breaking news - show more
+		bandPastHour:   5,  // Recent - good balance
+		bandToday:      3,  // Today - limit repetition
+		bandYesterday:  2,  // Yesterday - just highlights
+		bandOlder:      1,  // Older - one representative each
 	}
 
 	// Group items by time band
@@ -146,6 +158,8 @@ func interleaveWithinBands(items []feeds.Item) []feeds.Item {
 			continue
 		}
 
+		maxPerSource := maxPerSourceByBand[band]
+
 		// Group by source within this band
 		sourceItems := make(map[string][]feeds.Item)
 		var sourceOrder []string // preserve first-seen order of sources
@@ -156,15 +170,17 @@ func interleaveWithinBands(items []feeds.Item) []feeds.Item {
 			sourceItems[item.SourceName] = append(sourceItems[item.SourceName], item)
 		}
 
-		// Round-robin through sources
+		// Round-robin through sources, respecting maxPerSource limit
 		sourceIdx := make(map[string]int)
-		for added := 0; added < len(bandList); {
+		moreToAdd := true
+		for moreToAdd {
+			moreToAdd = false
 			for _, source := range sourceOrder {
 				idx := sourceIdx[source]
-				if idx < len(sourceItems[source]) {
+				if idx < len(sourceItems[source]) && idx < maxPerSource {
 					result = append(result, sourceItems[source][idx])
 					sourceIdx[source]++
-					added++
+					moreToAdd = true
 				}
 			}
 		}
