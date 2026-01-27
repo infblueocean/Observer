@@ -185,55 +185,13 @@ func New() Model {
 	// Initialize command palette
 	cmdPalette := command.New()
 
-	// Initialize AI Analysis with providers from config
+	// Initialize AI Analysis with unified provider system
 	brainTrustInstance := brain.NewBrainTrust(nil)
 
-	// Add Ollama provider (local, fast)
-	if cfg.Models.Ollama.Enabled {
-		ollamaProvider := brain.NewOllamaProvider(
-			cfg.Models.Ollama.Endpoint,
-			cfg.Models.Ollama.Model,
-		)
-		if ollamaProvider.Available() {
-			brainTrustInstance.AddProvider(ollamaProvider)
-			logging.Info("Ollama provider added", "endpoint", cfg.Models.Ollama.Endpoint, "model", cfg.Models.Ollama.Model)
-		} else {
-			logging.Warn("Ollama enabled but not available", "endpoint", cfg.Models.Ollama.Endpoint)
-		}
-	}
-
-	// Add Claude provider (cloud)
-	if cfg.Models.Claude.Enabled && cfg.Models.Claude.APIKey != "" {
-		claudeProvider := brain.NewClaudeProvider(cfg.Models.Claude.APIKey, cfg.Models.Claude.Model)
-		brainTrustInstance.AddProvider(claudeProvider)
-		logging.Info("Claude provider added", "model", cfg.Models.Claude.Model)
-	}
-
-	// Add OpenAI provider (cloud)
-	if cfg.Models.OpenAI.Enabled && cfg.Models.OpenAI.APIKey != "" {
-		openaiProvider := brain.NewOpenAIProvider(cfg.Models.OpenAI.APIKey, cfg.Models.OpenAI.Model)
-		brainTrustInstance.AddProvider(openaiProvider)
-		logging.Info("OpenAI provider added", "model", cfg.Models.OpenAI.Model)
-	}
-
-	// Add Gemini provider (cloud)
-	if cfg.Models.Gemini.Enabled && cfg.Models.Gemini.APIKey != "" {
-		geminiProvider := brain.NewGeminiProvider(cfg.Models.Gemini.APIKey, cfg.Models.Gemini.Model)
-		brainTrustInstance.AddProvider(geminiProvider)
-		logging.Info("Gemini provider added", "model", cfg.Models.Gemini.Model)
-	}
-
-	// Add Grok providers (cloud) - both reasoning and non-reasoning for variety
-	if cfg.Models.Grok.Enabled && cfg.Models.Grok.APIKey != "" {
-		// Fast non-reasoning model (instant responses)
-		grokFast := brain.NewGrokProvider(cfg.Models.Grok.APIKey, "grok-4-1-fast-non-reasoning")
-		brainTrustInstance.AddProvider(grokFast)
-		logging.Info("Grok provider added", "model", "grok-4-1-fast-non-reasoning")
-
-		// Reasoning model (deeper analysis, slower)
-		grokReasoning := brain.NewGrokProvider(cfg.Models.Grok.APIKey, "grok-4-1-fast")
-		brainTrustInstance.AddProvider(grokReasoning)
-		logging.Info("Grok provider added", "model", "grok-4-1-fast (reasoning)")
+	// Add all available providers (reads API keys from env vars)
+	for _, p := range brain.CreateAllProviders() {
+		brainTrustInstance.AddProvider(p)
+		logging.Info("Provider added", "name", p.Name())
 	}
 
 	// Connect store to analyzer for persistence

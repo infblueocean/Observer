@@ -356,35 +356,6 @@ RULES:
 				return
 			}
 
-			// Stage 2: Clean up with transcript model if available
-			if ollamaProvider, ok := localProvider.(*OllamaProvider); ok {
-				transcriptModel := ollamaProvider.GetTranscriptModel()
-				if transcriptModel != "" {
-					a.mu.Lock()
-					if existing, ok := a.analyses[item.ID]; ok {
-						existing.Stage = "summarizing"
-						existing.Provider = "ollama (cleaning up)"
-					}
-					a.mu.Unlock()
-
-					cleanupPrompt := `Clean up this news analysis. Remove any preamble like "Certainly" or "Here's". Remove markdown formatting (##, **, bullets). Output clean paragraphs only.
-
-Analysis to clean:
-` + resp.Content
-
-					cleanResp, cleanErr := ollamaProvider.GenerateWithModel(ctx, transcriptModel, Request{
-						SystemPrompt: "You clean up text. Output only the cleaned text, nothing else.",
-						UserPrompt:   cleanupPrompt,
-						MaxTokens:    500,
-					})
-
-					if cleanErr == nil && len(cleanResp.Content) > 50 {
-						resp.Content = cleanResp.Content
-						pipeline = append(pipeline, transcriptModel+" (cleanup)")
-					}
-				}
-			}
-
 			a.runAnalysisCompleteWithPipeline(item, "ollama", resp, nil, userPrompt, pipeline)
 		}()
 	}
@@ -644,37 +615,6 @@ RULES:
 		})
 
 		pipeline := []string{resp.Model}
-
-		// For local provider, do cleanup pass if transcript model available
-		if providerName == "ollama" {
-			if ollamaProvider, ok := provider.(*OllamaProvider); ok && err == nil {
-				transcriptModel := ollamaProvider.GetTranscriptModel()
-				if transcriptModel != "" {
-					a.mu.Lock()
-					if existing, ok := a.analyses[item.ID]; ok {
-						existing.Stage = "summarizing"
-						existing.Provider = "ollama (cleaning up)"
-					}
-					a.mu.Unlock()
-
-					cleanupPrompt := `Clean up this news analysis. Remove any preamble like "Certainly" or "Here's". Remove markdown formatting (##, **, bullets). Output clean paragraphs only.
-
-Analysis to clean:
-` + resp.Content
-
-					cleanResp, cleanErr := ollamaProvider.GenerateWithModel(ctx, transcriptModel, Request{
-						SystemPrompt: "You clean up text. Output only the cleaned text, nothing else.",
-						UserPrompt:   cleanupPrompt,
-						MaxTokens:    500,
-					})
-
-					if cleanErr == nil && len(cleanResp.Content) > 50 {
-						resp.Content = cleanResp.Content
-						pipeline = append(pipeline, transcriptModel+" (cleanup)")
-					}
-				}
-			}
-		}
 
 		a.runAnalysisCompleteWithPipeline(item, providerName, resp, err, userPrompt, pipeline)
 	}()
