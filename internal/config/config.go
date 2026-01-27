@@ -142,7 +142,37 @@ func Load() (*Config, error) {
 		return DefaultConfig(), nil
 	}
 
+	// Migrate deprecated model names to current versions
+	cfg.migrateModels()
+
 	return &cfg, nil
+}
+
+// migrateModels updates deprecated model names to current versions
+func (c *Config) migrateModels() {
+	// Grok model migrations
+	switch c.Models.Grok.Model {
+	case "grok-beta", "grok-2", "grok-2-beta", "grok-3":
+		c.Models.Grok.Model = "grok-4-1-fast-non-reasoning"
+	}
+
+	// OpenAI model migrations
+	switch c.Models.OpenAI.Model {
+	case "gpt-4", "gpt-4-turbo", "gpt-4o", "gpt-4o-mini", "gpt-5", "gpt-5.1":
+		c.Models.OpenAI.Model = "gpt-5.2"
+	}
+
+	// Gemini model migrations
+	switch c.Models.Gemini.Model {
+	case "gemini-pro", "gemini-1.5-pro", "gemini-1.5-flash", "gemini-2.0-flash", "gemini-2.0-pro":
+		c.Models.Gemini.Model = "gemini-3-flash-preview"
+	}
+
+	// Claude model migrations (keep up to date)
+	switch c.Models.Claude.Model {
+	case "claude-3-opus", "claude-3-sonnet", "claude-3-haiku", "claude-3.5-sonnet", "claude-sonnet-4-20250514":
+		c.Models.Claude.Model = "claude-sonnet-4-5-20250929"
+	}
 }
 
 // Save writes config to disk
