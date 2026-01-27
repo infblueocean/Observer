@@ -102,6 +102,10 @@ type Model struct {
 	sessionID         int64     // Current session ID for tracking
 	lastSessionTime   time.Time // When user was last active
 	showBriefingOnStart bool    // Whether to show briefing on first render
+
+	// Correlation pipeline context
+	correlationCtx    context.Context
+	correlationCancel context.CancelFunc
 }
 
 // New creates a new app model
@@ -290,6 +294,15 @@ func New() Model {
 	qm.RegisterSource("Polymarket", feeds.SourcePolymarket, time.Duration(feeds.RefreshNormal)*time.Minute)
 	qm.RegisterSource("Manifold", feeds.SourceManifold, time.Duration(feeds.RefreshNormal)*time.Minute)
 
+	// Create context for correlation pipeline
+	ctx, cancel := context.WithCancel(context.Background())
+
+	// Start correlation engine pipeline
+	if correlationEngine != nil {
+		correlationEngine.Start(ctx)
+		logging.Info("Correlation pipeline started")
+	}
+
 	return Model{
 		stream:              streamModel,
 		filterView:          filters.New(filterEngine),
@@ -313,6 +326,8 @@ func New() Model {
 		lastSessionTime:     lastSessionTime,
 		showBriefingOnStart: showBriefingOnStart,
 		streamBuffer:        &strings.Builder{},
+		correlationCtx:      ctx,
+		correlationCancel:   cancel,
 	}
 }
 
@@ -324,6 +339,11 @@ func (m Model) Init() tea.Cmd {
 		m.brainTrustPanel.Spinner().Tick,
 	}
 
+	// Subscribe to correlation events
+	if m.correlationEngine != nil {
+		cmds = append(cmds, m.subscribeCorrelation())
+	}
+
 	// Show briefing on startup if needed (after a delay to let window size be set)
 	if m.showBriefingOnStart {
 		cmds = append(cmds, func() tea.Msg {
@@ -332,6 +352,20 @@ func (m Model) Init() tea.Cmd {
 	}
 
 	return tea.Batch(cmds...)
+}
+
+// subscribeCorrelation returns a command that waits for correlation events
+func (m Model) subscribeCorrelation() tea.Cmd {
+	if m.correlationEngine == nil {
+		return nil
+	}
+	return func() tea.Msg {
+		event, ok := <-m.correlationEngine.Results()
+		if !ok {
+			return nil // Channel closed
+		}
+		return CorrelationEventMsg{Event: event}
+	}
 }
 
 // Update handles messages
@@ -452,6 +486,22 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		return m, nil
+
+	case CorrelationEventMsg:
+		// Handle events from the correlation pipeline
+		// The UI reads data directly from caches, so we just need to trigger re-renders
+		switch event := msg.Event.(type) {
+		case correlation.DuplicateFound:
+			logging.Debug("Correlation: duplicate found", "item", event.ItemID, "primary", event.PrimaryID, "size", event.GroupSize)
+		case correlation.EntitiesExtracted:
+			logging.Debug("Correlation: entities extracted", "item", event.ItemID, "count", len(event.Entities))
+		case correlation.ClusterUpdated:
+			logging.Debug("Correlation: cluster updated", "cluster", event.ClusterID, "item", event.ItemID, "size", event.Size)
+		case correlation.BatchComplete:
+			logging.Info("Correlation: batch complete", "items", event.ItemsProcessed, "duplicates", event.DuplicatesFound)
+		}
+		// Re-subscribe to get next event
+		return m, m.subscribeCorrelation()
 
 	case TickMsg:
 		// Clear error pane after 10 seconds of no new errors
@@ -1033,6 +1083,15 @@ func (m *Model) executeCommand(cmd string) (tea.Model, tea.Cmd) {
 
 // saveAndClose saves state and closes the store
 func (m *Model) saveAndClose() {
+	// Stop correlation pipeline
+	if m.correlationCancel != nil {
+		m.correlationCancel()
+		logging.Info("Correlation pipeline stopped")
+	}
+	if m.correlationEngine != nil {
+		m.correlationEngine.Stop()
+	}
+
 	if m.store == nil {
 		return
 	}

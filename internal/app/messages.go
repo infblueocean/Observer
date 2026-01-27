@@ -2,6 +2,7 @@ package app
 
 import (
 	"github.com/abelbrown/observer/internal/brain"
+	"github.com/abelbrown/observer/internal/correlation"
 	"github.com/abelbrown/observer/internal/feeds"
 )
 
@@ -51,11 +52,9 @@ type TopStoriesMsg struct {
 	Err     error
 }
 
-// CorrelationProcessedMsg is sent when correlation processing completes for items
-type CorrelationProcessedMsg struct {
-	ItemCount      int
-	DuplicateCount int
-	ClusterCount   int
+// CorrelationEventMsg wraps events from the correlation pipeline
+type CorrelationEventMsg struct {
+	Event correlation.CorrelationEvent
 }
 
 // ShowBriefingMsg is sent on startup if user needs a briefing
