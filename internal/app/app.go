@@ -629,17 +629,13 @@ func (m *Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	} else {
 		m.mouseOverAnalysis = false
 
-		// Scroll wheel over main content area scrolls the feed
+		// Scroll wheel over main content area scrolls the feed (one item at a time)
 		switch msg.Button {
 		case tea.MouseButtonWheelUp:
-			m.stream.MoveUp()
-			m.stream.MoveUp()
 			m.stream.MoveUp()
 			m.updateBrainTrustForSelectedItem()
 			return m, nil
 		case tea.MouseButtonWheelDown:
-			m.stream.MoveDown()
-			m.stream.MoveDown()
 			m.stream.MoveDown()
 			m.updateBrainTrustForSelectedItem()
 			return m, nil
