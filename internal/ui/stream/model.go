@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/abelbrown/observer/internal/correlation"
 	"github.com/abelbrown/observer/internal/feeds"
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/harmonica"
@@ -273,7 +274,8 @@ const TopStoriesRefreshInterval = 30 * time.Second
 // Model is the stream view showing feed items flowing by
 type Model struct {
 	items        []feeds.Item
-	categories   map[string]string // item ID -> category lookup
+	itemBands    map[string]timeBand       // item ID -> cached time band (set at load time)
+	categories   map[string]string         // item ID -> category lookup
 	cursor       int
 	width        int
 	height       int
@@ -284,6 +286,14 @@ type Model struct {
 	topStories   []TopStory                // AI-identified top stories
 	topStoriesLoading bool                 // Whether top stories are being analyzed
 	topStoriesLastRefresh time.Time        // When top stories were last refreshed
+
+	// Correlation engine for duplicate/cluster indicators
+	correlationEngine *correlation.Engine
+
+	// Filtering
+	filterEntityID  string // Filter to show only items with this entity
+	filterClusterID string // Filter to show only items in this cluster
+	filterLabel     string // Human-readable filter description
 
 	// Smooth scrolling with harmonica spring physics
 	scrollSpring   harmonica.Spring
@@ -304,6 +314,7 @@ func New() Model {
 
 	return Model{
 		items:        make([]feeds.Item, 0),
+		itemBands:    make(map[string]timeBand),
 		categories:   make(map[string]string),
 		loading:      true,
 		spinner:      s,
@@ -354,6 +365,13 @@ func (m *Model) SetItems(items []feeds.Item) {
 	m.loading = false
 	if m.cursor >= len(m.items) {
 		m.cursor = max(0, len(m.items)-1)
+	}
+
+	// Cache time bands at load time to avoid band drift during render
+	// Without this, items can change bands between when they're grouped and when they're rendered
+	m.itemBands = make(map[string]timeBand)
+	for _, item := range m.items {
+		m.itemBands[item.ID] = getTimeBand(item.Published)
 	}
 
 	// Calculate source activity stats
@@ -523,6 +541,72 @@ func (m *Model) SetItemCategory(itemID, category string) {
 	m.categories[itemID] = category
 }
 
+// SetCorrelationEngine sets the correlation engine for duplicate/cluster display
+func (m *Model) SetCorrelationEngine(engine *correlation.Engine) {
+	m.correlationEngine = engine
+}
+
+// SetFilterByEntity filters to show only items containing the given entity
+func (m *Model) SetFilterByEntity(entityID, label string) {
+	m.filterEntityID = entityID
+	m.filterClusterID = ""
+	m.filterLabel = label
+	m.cursor = 0
+}
+
+// SetFilterByCluster filters to show only items in the given cluster
+func (m *Model) SetFilterByCluster(clusterID, label string) {
+	m.filterClusterID = clusterID
+	m.filterEntityID = ""
+	m.filterLabel = label
+	m.cursor = 0
+}
+
+// ClearFilter removes any active filter
+func (m *Model) ClearFilter() {
+	m.filterEntityID = ""
+	m.filterClusterID = ""
+	m.filterLabel = ""
+}
+
+// HasFilter returns true if a filter is active
+func (m Model) HasFilter() bool {
+	return m.filterEntityID != "" || m.filterClusterID != ""
+}
+
+// FilterLabel returns the current filter description
+func (m Model) FilterLabel() string {
+	return m.filterLabel
+}
+
+// getFilteredItems returns items matching the current filter
+func (m Model) getFilteredItems() []feeds.Item {
+	if !m.HasFilter() || m.correlationEngine == nil {
+		return m.items
+	}
+
+	var filtered []feeds.Item
+	for _, item := range m.items {
+		if m.filterEntityID != "" {
+			// Check if item has this entity
+			entities := m.correlationEngine.GetItemEntities(item.ID)
+			for _, e := range entities {
+				if e.EntityID == m.filterEntityID {
+					filtered = append(filtered, item)
+					break
+				}
+			}
+		} else if m.filterClusterID != "" {
+			// Check if item is in this cluster
+			cluster := m.correlationEngine.GetClusterInfo(item.ID)
+			if cluster != nil && cluster.ID == m.filterClusterID {
+				filtered = append(filtered, item)
+			}
+		}
+	}
+	return filtered
+}
+
 // SetLoading sets the loading state
 func (m *Model) SetLoading(loading bool) {
 	m.loading = loading
@@ -538,7 +622,8 @@ func (m *Model) MoveUp() {
 
 // MoveDown moves cursor down with smooth scrolling
 func (m *Model) MoveDown() {
-	if m.cursor < len(m.items)-1 {
+	items := m.getFilteredItems()
+	if m.cursor < len(items)-1 {
 		m.cursor++
 		m.scrollTarget = float64(m.cursor)
 	}
@@ -562,8 +647,14 @@ func (m Model) IsScrolling() bool {
 
 // SelectedItem returns the currently selected item, if any
 func (m *Model) SelectedItem() *feeds.Item {
-	if m.cursor >= 0 && m.cursor < len(m.items) {
-		return &m.items[m.cursor]
+	items := m.getFilteredItems()
+	if m.cursor >= 0 && m.cursor < len(items) {
+		// Need to find the item in the original slice to return a stable pointer
+		for i := range m.items {
+			if m.items[i].ID == items[m.cursor].ID {
+				return &m.items[i]
+			}
+		}
 	}
 	return nil
 }
@@ -597,6 +688,17 @@ func (m Model) View() string {
 
 	// Render top stories as fixed header (ALWAYS visible)
 	topLines := m.renderTopStoriesSection()
+
+	// Add filter indicator if active
+	if m.HasFilter() {
+		filterStyle := lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#a371f7")).
+			Background(lipgloss.Color("#1f1d2e")).
+			Padding(0, 1)
+		clearHint := lipgloss.NewStyle().Foreground(lipgloss.Color("#6e7681")).Render(" (Esc to clear)")
+		topLines = append(topLines, filterStyle.Render("🔍 "+m.filterLabel)+clearHint)
+	}
+
 	topSection := strings.Join(topLines, "\n")
 	topSectionHeight := len(topLines) + 2 // +2 for padding
 	topSection = topSection + "\n\n" // Add spacing after
@@ -830,6 +932,9 @@ func (m Model) renderItemsOnly(headerHeight int) string {
 	// Calculate how many lines we can show (minus fixed header)
 	availableHeight := m.height - 2 - headerHeight // Leave room for scroll indicator and header
 
+	// Get items (filtered if filter is active)
+	items := m.getFilteredItems()
+
 	// Build all renderable content with item indices
 	// Selected items may have multiple lines (title + summary) in comfortable mode
 	type renderedBlock struct {
@@ -839,8 +944,12 @@ func (m Model) renderItemsOnly(headerHeight int) string {
 	var allBlocks []renderedBlock
 
 	currentBand := timeBand(-1)
-	for i, item := range m.items {
-		band := getTimeBand(item.Published)
+	for i, item := range items {
+		// Use cached band to avoid drift between grouping time and render time
+		band, ok := m.itemBands[item.ID]
+		if !ok {
+			band = getTimeBand(item.Published) // Fallback for items not in cache
+		}
 
 		// Add time band divider if band changed (skip in compact mode)
 		if band != currentBand && m.density != DensityCompact {
@@ -1022,15 +1131,82 @@ func (m Model) renderItem(item feeds.Item, selected bool) string {
 			Render(" ⚡")
 	}
 
+	// Duplicate indicator (×N)
+	duplicateIndicator := ""
+	if m.correlationEngine != nil {
+		dupCount := m.correlationEngine.GetDuplicateCount(item.ID)
+		if dupCount > 0 {
+			// Only show if this is the primary item in the group
+			if m.correlationEngine.IsPrimaryInGroup(item.ID) {
+				duplicateIndicator = lipgloss.NewStyle().
+					Foreground(lipgloss.Color("#8b949e")).
+					Render(fmt.Sprintf(" ×%d", dupCount+1)) // +1 to include this item
+			}
+		}
+	}
+
+	// Cluster indicator (◐ N) with optional velocity sparkline
+	clusterIndicator := ""
+	if m.correlationEngine != nil {
+		if cluster := m.correlationEngine.GetClusterInfo(item.ID); cluster != nil {
+			if m.correlationEngine.IsClusterPrimary(item.ID) && cluster.ItemCount > 1 {
+				// Base indicator
+				indicatorStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#58a6ff"))
+
+				// Check velocity trend
+				trend := m.correlationEngine.GetClusterVelocityTrend(cluster.ID)
+				switch trend {
+				case correlation.TrendSpiking:
+					// Hot cluster - show with fire and sparkline
+					indicatorStyle = indicatorStyle.Foreground(lipgloss.Color("#f85149")).Bold(true)
+					sparkData := m.correlationEngine.GetClusterSparklineData(cluster.ID, 5)
+					if len(sparkData) > 0 {
+						spark := renderSparkline(sparkData, 5)
+						clusterIndicator = indicatorStyle.Render(fmt.Sprintf(" 🔥◐%d %s", cluster.ItemCount, spark))
+					} else {
+						clusterIndicator = indicatorStyle.Render(fmt.Sprintf(" 🔥◐%d", cluster.ItemCount))
+					}
+				case correlation.TrendSteady:
+					clusterIndicator = indicatorStyle.Render(fmt.Sprintf(" ◐%d", cluster.ItemCount))
+				case correlation.TrendFading:
+					indicatorStyle = indicatorStyle.Foreground(lipgloss.Color("#8b949e"))
+					clusterIndicator = indicatorStyle.Render(fmt.Sprintf(" ◐%d", cluster.ItemCount))
+				default:
+					clusterIndicator = indicatorStyle.Render(fmt.Sprintf(" ◐%d", cluster.ItemCount))
+				}
+			}
+		}
+	}
+
+	// Disagreement indicator (⚡) - shown when sources conflict
+	disagreementIndicator := ""
+	if m.correlationEngine != nil {
+		if m.correlationEngine.ItemHasDisagreement(item.ID) {
+			disagreementIndicator = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("#d29922")). // Yellow/orange for attention
+				Bold(true).
+				Render(" ⚡")
+		}
+	}
+
 	// Title width calculation
 	badgeWidth := lipgloss.Width(sourceBadge)
 	timeWidth := len(timeStr) + 2
 	indicatorWidth := 0
 	if freshIndicator != "" {
-		indicatorWidth = 3
+		indicatorWidth += 3
 	}
 	if breakingIndicator != "" {
-		indicatorWidth = 3
+		indicatorWidth += 3
+	}
+	if duplicateIndicator != "" {
+		indicatorWidth += 5 // " ×N" is roughly 4-5 chars
+	}
+	if clusterIndicator != "" {
+		indicatorWidth += 5 // " ◐N" is roughly 4-5 chars
+	}
+	if disagreementIndicator != "" {
+		indicatorWidth += 3 // " ⚡"
 	}
 	maxTitleWidth := m.width - badgeWidth - timeWidth - indicatorWidth - 8
 	if maxTitleWidth < 20 {
@@ -1073,8 +1249,11 @@ func (m Model) renderItem(item feeds.Item, selected bool) string {
 		indicator = breakingIndicator
 	}
 
+	// Build indicators string
+	indicators := indicator + duplicateIndicator + clusterIndicator + disagreementIndicator
+
 	titleStyle := lipgloss.NewStyle().Foreground(titleColor)
-	line := fmt.Sprintf("  %s  %s%s", sourceBadge, titleStyle.Render(title), indicator)
+	line := fmt.Sprintf("  %s  %s%s", sourceBadge, titleStyle.Render(title), indicators)
 
 	lineWidth := lipgloss.Width(line)
 	padding := m.width - lineWidth - len(timeStr) - 4
@@ -1244,6 +1423,30 @@ func (m Model) renderSelectedItem(item feeds.Item, sourceBadge, title, timeStr, 
 			stats.recentCount))
 	}
 
+	// Entity pills line (tickers, countries)
+	entityLine := ""
+	if m.correlationEngine != nil {
+		entities := m.correlationEngine.GetItemEntities(item.ID)
+		if len(entities) > 0 {
+			var pills []string
+			seen := make(map[string]bool)
+			for _, ent := range entities {
+				if seen[ent.EntityID] || len(pills) >= 5 {
+					continue
+				}
+				seen[ent.EntityID] = true
+
+				pill := m.renderEntityPill(ent.EntityID, selectionBg)
+				if pill != "" {
+					pills = append(pills, pill)
+				}
+			}
+			if len(pills) > 0 {
+				entityLine = selectionStyle.Width(m.width - 2).Render("     " + strings.Join(pills, " "))
+			}
+		}
+	}
+
 	// URL hint
 	urlHint := ""
 	if item.URL != "" {
@@ -1260,6 +1463,9 @@ func (m Model) renderSelectedItem(item feeds.Item, sourceBadge, title, timeStr, 
 	// Combine lines - each line already has the selection background
 	var lines []string
 	lines = append(lines, titleLine)
+	if entityLine != "" {
+		lines = append(lines, entityLine)
+	}
 	if sparklineLine != "" {
 		lines = append(lines, sparklineLine)
 	}
@@ -1485,4 +1691,115 @@ func min(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// renderEntityPill renders an entity as a colored pill
+// Entity IDs are prefixed: ticker:AAPL, country:china, source:reuters
+func (m Model) renderEntityPill(entityID string, bg lipgloss.Color) string {
+	parts := strings.SplitN(entityID, ":", 2)
+	if len(parts) != 2 {
+		return ""
+	}
+
+	entityType := parts[0]
+	entityValue := parts[1]
+
+	switch entityType {
+	case "ticker":
+		// Stock ticker - blue pill with $ prefix
+		style := lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#58a6ff")).
+			Background(bg).
+			Bold(true)
+		return style.Render("$" + entityValue)
+
+	case "country":
+		// Country - show flag emoji + name
+		flag := getCountryFlag(entityValue)
+		name := formatCountryName(entityValue)
+		style := lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#7ee787")).
+			Background(bg)
+		return style.Render(flag + " " + name)
+
+	case "source":
+		// Source attribution - gray pill
+		style := lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#8b949e")).
+			Background(bg).
+			Italic(true)
+		return style.Render("via " + entityValue)
+
+	default:
+		return ""
+	}
+}
+
+// getCountryFlag returns emoji flag for a country
+var countryFlags = map[string]string{
+	"united_states":   "🇺🇸",
+	"china":           "🇨🇳",
+	"russia":          "🇷🇺",
+	"united_kingdom":  "🇬🇧",
+	"germany":         "🇩🇪",
+	"france":          "🇫🇷",
+	"japan":           "🇯🇵",
+	"india":           "🇮🇳",
+	"ukraine":         "🇺🇦",
+	"israel":          "🇮🇱",
+	"palestine":       "🇵🇸",
+	"iran":            "🇮🇷",
+	"north_korea":     "🇰🇵",
+	"south_korea":     "🇰🇷",
+	"taiwan":          "🇹🇼",
+	"canada":          "🇨🇦",
+	"australia":       "🇦🇺",
+	"brazil":          "🇧🇷",
+	"mexico":          "🇲🇽",
+	"italy":           "🇮🇹",
+	"spain":           "🇪🇸",
+	"european_union":  "🇪🇺",
+	"nato":            "🏛️",
+	"saudi_arabia":    "🇸🇦",
+	"uae":             "🇦🇪",
+	"turkey":          "🇹🇷",
+	"egypt":           "🇪🇬",
+	"south_africa":    "🇿🇦",
+	"nigeria":         "🇳🇬",
+	"indonesia":       "🇮🇩",
+	"singapore":       "🇸🇬",
+	"hong_kong":       "🇭🇰",
+	"vietnam":         "🇻🇳",
+	"thailand":        "🇹🇭",
+	"philippines":     "🇵🇭",
+	"argentina":       "🇦🇷",
+	"syria":           "🇸🇾",
+	"afghanistan":     "🇦🇫",
+	"iraq":            "🇮🇶",
+	"netherlands":     "🇳🇱",
+	"switzerland":     "🇨🇭",
+	"sweden":          "🇸🇪",
+	"norway":          "🇳🇴",
+	"poland":          "🇵🇱",
+}
+
+func getCountryFlag(id string) string {
+	if flag, ok := countryFlags[id]; ok {
+		return flag
+	}
+	return "🌍"
+}
+
+// formatCountryName formats country ID as display name
+func formatCountryName(id string) string {
+	// Convert underscores to spaces and title case
+	name := strings.ReplaceAll(id, "_", " ")
+	// Simple title case
+	words := strings.Fields(name)
+	for i, w := range words {
+		if len(w) > 0 {
+			words[i] = strings.ToUpper(string(w[0])) + w[1:]
+		}
+	}
+	return strings.Join(words, " ")
 }

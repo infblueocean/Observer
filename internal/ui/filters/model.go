@@ -375,10 +375,14 @@ func (m Model) renderCreateAction() string {
 			cursor = "▶ "
 			style = lipgloss.NewStyle().Foreground(styles.ColorAccentBlue)
 		}
+		padding := 8 - len(action)
+		if padding < 0 {
+			padding = 0
+		}
 		options.WriteString(fmt.Sprintf("%s%s%s - %s\n",
 			cursor,
 			style.Render(string(action)),
-			strings.Repeat(" ", 8-len(action)),
+			strings.Repeat(" ", padding),
 			actionDescs[action],
 		))
 	}

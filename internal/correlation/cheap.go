@@ -1,8 +1,11 @@
 package correlation
 
 import (
+	"fmt"
 	"regexp"
 	"strings"
+
+	"github.com/abelbrown/observer/internal/feeds"
 )
 
 // Cheap extraction functions - no LLM required, instant processing
@@ -216,4 +219,270 @@ func SimilarityScore(hash1, hash2 uint64) float64 {
 // Threshold of 0.8 means at least 80% of bits match
 func AreDuplicates(hash1, hash2 uint64) bool {
 	return SimilarityScore(hash1, hash2) >= 0.8
+}
+
+// CheapExtractor implements EntityExtractor using fast regex-based extraction
+// No LLM required - runs instantly on every item
+type CheapExtractor struct{}
+
+// NewCheapExtractor creates a new cheap extractor
+func NewCheapExtractor() *CheapExtractor {
+	return &CheapExtractor{}
+}
+
+// Extract extracts entities from item title and content using regex patterns
+func (e *CheapExtractor) Extract(item feeds.Item) ([]ItemEntity, error) {
+	var entities []ItemEntity
+	text := item.Title + " " + item.Summary + " " + item.Content
+
+	// Extract stock tickers with high salience (explicit financial reference)
+	tickers := ExtractTickers(text)
+	for _, ticker := range tickers {
+		entities = append(entities, ItemEntity{
+			ItemID:   item.ID,
+			EntityID: "ticker:" + ticker,
+			Context:  extractContext(text, "$"+ticker),
+			Salience: 0.9, // Tickers are highly specific
+		})
+	}
+
+	// Extract countries with moderate salience
+	countries := ExtractCountries(text)
+	for _, country := range countries {
+		entities = append(entities, ItemEntity{
+			ItemID:   item.ID,
+			EntityID: "country:" + country,
+			Context:  extractContext(text, country),
+			Salience: 0.6, // Countries are common, lower salience unless repeated
+		})
+	}
+
+	// Extract source attribution (is this aggregated content?)
+	if attr := ExtractSourceAttribution(text); attr != nil && attr.OriginalSource != "" {
+		entities = append(entities, ItemEntity{
+			ItemID:   item.ID,
+			EntityID: "source:" + strings.ToLower(attr.OriginalSource),
+			Context:  "Citing " + attr.OriginalSource,
+			Salience: 0.5,
+		})
+	}
+
+	return entities, nil
+}
+
+// extractContext extracts a snippet of text around the target phrase
+func extractContext(text, target string) string {
+	lower := strings.ToLower(text)
+	targetLower := strings.ToLower(target)
+	idx := strings.Index(lower, targetLower)
+	if idx < 0 {
+		return ""
+	}
+
+	// Extract 50 chars before and after
+	start := idx - 50
+	if start < 0 {
+		start = 0
+	}
+	end := idx + len(target) + 50
+	if end > len(text) {
+		end = len(text)
+	}
+
+	return strings.TrimSpace(text[start:end])
+}
+
+// Claim extraction patterns
+var (
+	// Numbers with units (e.g., "$1.5 billion", "30%", "1,000 people")
+	numberClaimRegex = regexp.MustCompile(`(\$?[\d,]+\.?\d*)\s*(billion|million|thousand|percent|%|people|deaths|cases|troops|dollars)`)
+
+	// Quoted statements
+	quoteClaimRegex = regexp.MustCompile(`"([^"]{10,200})"`)
+
+	// Attribution patterns (X said/claims/denied)
+	attributionRegex = regexp.MustCompile(`(?i)([\w\s]+)\s+(said|says|claims?|denied|announced|confirmed|reported|stated)\s+(?:that\s+)?(.{10,100})`)
+
+	// Denial patterns
+	denialRegex = regexp.MustCompile(`(?i)(denied|refuted|rejected|dismissed|contradicted|disputed)`)
+
+	// Prediction patterns
+	predictionRegex = regexp.MustCompile(`(?i)(will|expected to|forecast|predicted|projected)\s+(.{10,100})`)
+)
+
+// ExtractedClaim represents a claim extracted from text
+type ExtractedClaim struct {
+	Text       string
+	Type       string // "number", "quote", "attribution", "denial", "prediction"
+	Value      string // The specific value (number, quote text, etc.)
+	Speaker    string // Who made the claim (if attribution)
+	Confidence float64
+}
+
+// ExtractClaims extracts verifiable claims from text
+func ExtractClaims(text string) []ExtractedClaim {
+	var claims []ExtractedClaim
+
+	// Extract number claims
+	for _, match := range numberClaimRegex.FindAllStringSubmatch(text, -1) {
+		if len(match) >= 3 {
+			claims = append(claims, ExtractedClaim{
+				Text:       match[0],
+				Type:       "number",
+				Value:      match[1] + " " + match[2],
+				Confidence: 0.8,
+			})
+		}
+	}
+
+	// Extract quotes
+	for _, match := range quoteClaimRegex.FindAllStringSubmatch(text, -1) {
+		if len(match) >= 2 {
+			claims = append(claims, ExtractedClaim{
+				Text:       match[0],
+				Type:       "quote",
+				Value:      match[1],
+				Confidence: 0.9,
+			})
+		}
+	}
+
+	// Extract attributions
+	for _, match := range attributionRegex.FindAllStringSubmatch(text, -1) {
+		if len(match) >= 4 {
+			claims = append(claims, ExtractedClaim{
+				Text:       match[0],
+				Type:       "attribution",
+				Value:      match[3],
+				Speaker:    strings.TrimSpace(match[1]),
+				Confidence: 0.7,
+			})
+		}
+	}
+
+	// Check for denials
+	if denialRegex.MatchString(text) {
+		for _, match := range attributionRegex.FindAllStringSubmatch(text, -1) {
+			if len(match) >= 4 && denialRegex.MatchString(match[2]) {
+				claims = append(claims, ExtractedClaim{
+					Text:       match[0],
+					Type:       "denial",
+					Value:      match[3],
+					Speaker:    strings.TrimSpace(match[1]),
+					Confidence: 0.8,
+				})
+			}
+		}
+	}
+
+	// Extract predictions
+	for _, match := range predictionRegex.FindAllStringSubmatch(text, -1) {
+		if len(match) >= 3 {
+			claims = append(claims, ExtractedClaim{
+				Text:       match[0],
+				Type:       "prediction",
+				Value:      match[2],
+				Confidence: 0.6,
+			})
+		}
+	}
+
+	return claims
+}
+
+// DetectConflicts checks if two sets of claims have conflicts
+func DetectConflicts(claims1, claims2 []ExtractedClaim) []DisagreementInfo {
+	var conflicts []DisagreementInfo
+
+	for _, c1 := range claims1 {
+		for _, c2 := range claims2 {
+			// Check for conflicting numbers on same topic
+			if c1.Type == "number" && c2.Type == "number" {
+				if numbersConflict(c1.Value, c2.Value) {
+					conflicts = append(conflicts, DisagreementInfo{
+						Type:        "factual",
+						Description: fmt.Sprintf("Conflicting figures: %s vs %s", c1.Value, c2.Value),
+						ClaimA:      c1.Text,
+						ClaimB:      c2.Text,
+					})
+				}
+			}
+
+			// Check for denials
+			if c1.Type == "denial" || c2.Type == "denial" {
+				conflicts = append(conflicts, DisagreementInfo{
+					Type:        "denial",
+					Description: "Source denies claim made by another",
+					ClaimA:      c1.Text,
+					ClaimB:      c2.Text,
+				})
+			}
+
+			// Check for contradictory quotes from same speaker
+			if c1.Type == "attribution" && c2.Type == "attribution" {
+				if c1.Speaker == c2.Speaker && c1.Value != c2.Value {
+					conflicts = append(conflicts, DisagreementInfo{
+						Type:        "framing",
+						Description: fmt.Sprintf("Different statements attributed to %s", c1.Speaker),
+						ClaimA:      c1.Text,
+						ClaimB:      c2.Text,
+					})
+				}
+			}
+		}
+	}
+
+	return conflicts
+}
+
+// DisagreementInfo holds information about a detected disagreement
+type DisagreementInfo struct {
+	Type        string // "factual", "framing", "denial", "omission"
+	Description string
+	ClaimA      string
+	ClaimB      string
+}
+
+// numbersConflict checks if two number claims are significantly different
+func numbersConflict(val1, val2 string) bool {
+	// Extract numeric parts
+	num1 := extractNumber(val1)
+	num2 := extractNumber(val2)
+
+	if num1 == 0 || num2 == 0 {
+		return false
+	}
+
+	// Check if numbers differ by more than 20%
+	diff := num1 - num2
+	if diff < 0 {
+		diff = -diff
+	}
+	avg := (num1 + num2) / 2
+
+	return diff/avg > 0.2
+}
+
+// extractNumber extracts a float from a string like "1.5 billion"
+func extractNumber(s string) float64 {
+	// Remove $ and commas
+	s = strings.ReplaceAll(s, "$", "")
+	s = strings.ReplaceAll(s, ",", "")
+
+	// Parse multiplier
+	multiplier := 1.0
+	sLower := strings.ToLower(s)
+	if strings.Contains(sLower, "billion") {
+		multiplier = 1e9
+	} else if strings.Contains(sLower, "million") {
+		multiplier = 1e6
+	} else if strings.Contains(sLower, "thousand") {
+		multiplier = 1e3
+	}
+
+	// Extract the number
+	var num float64
+	fmt.Sscanf(s, "%f", &num)
+
+	return num * multiplier
 }

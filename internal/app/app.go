@@ -7,11 +7,12 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/abelbrown/observer/internal/brain"
 	"github.com/abelbrown/observer/internal/config"
-	"github.com/abelbrown/observer/internal/logging"
+	"github.com/abelbrown/observer/internal/correlation"
 	"github.com/abelbrown/observer/internal/curation"
 	"github.com/abelbrown/observer/internal/feeds"
 	"github.com/abelbrown/observer/internal/feeds/hackernews"
@@ -19,14 +20,17 @@ import (
 	"github.com/abelbrown/observer/internal/feeds/polymarket"
 	"github.com/abelbrown/observer/internal/feeds/rss"
 	"github.com/abelbrown/observer/internal/feeds/usgs"
+	"github.com/abelbrown/observer/internal/logging"
 	"github.com/abelbrown/observer/internal/store"
 	"github.com/abelbrown/observer/internal/ui/braintrust"
+	"github.com/abelbrown/observer/internal/ui/briefing"
 	"github.com/abelbrown/observer/internal/ui/command"
-	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/abelbrown/observer/internal/ui/configview"
 	"github.com/abelbrown/observer/internal/ui/filters"
+	"github.com/abelbrown/observer/internal/ui/radar"
 	"github.com/abelbrown/observer/internal/ui/sources"
 	"github.com/abelbrown/observer/internal/ui/stream"
+	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
@@ -40,6 +44,9 @@ const (
 	modeFilterWorkshop
 	modeConfig
 	modeSources
+	modeRadar
+	modeBriefing
+	modeHelp
 )
 
 // RecentError holds an error with its timestamp
@@ -50,27 +57,30 @@ type RecentError struct {
 
 // Model is the root Bubble Tea model
 type Model struct {
-	stream          stream.Model
-	filterView      filters.Model
-	filterWorkshop  filters.WorkshopModel
-	configView      configview.Model
-	sourcesView     sources.Model
-	brainTrustPanel braintrust.Model
-	brainTrust      *brain.BrainTrust
-	cmdPalette      command.Palette
-	filterEngine    *curation.FilterEngine
-	sourceManager   *curation.SourceManager
-	aggregator      *feeds.Aggregator
-	store           *store.Store
-	config          *config.Config
-	itemCategories  map[string]string // item ID -> category
-	width           int
-	height          int
-	recentErrors    []RecentError // Last 2 errors
-	lastErrorTime   time.Time     // When to hide error pane (10s after last error)
-	mode                 viewMode
-	showSources          bool
-	showBrainTrust       bool
+	stream            stream.Model
+	filterView        filters.Model
+	filterWorkshop    filters.WorkshopModel
+	configView        configview.Model
+	sourcesView       sources.Model
+	radarView         radar.Model
+	briefingView      briefing.Model
+	brainTrustPanel   braintrust.Model
+	brainTrust        *brain.BrainTrust
+	cmdPalette        command.Palette
+	filterEngine      *curation.FilterEngine
+	sourceManager     *curation.SourceManager
+	aggregator        *feeds.Aggregator
+	store             *store.Store
+	config            *config.Config
+	correlationEngine *correlation.Engine
+	itemCategories    map[string]string // item ID -> category
+	width             int
+	height            int
+	recentErrors      []RecentError // Last 2 errors
+	lastErrorTime     time.Time     // When to hide error pane (10s after last error)
+	mode              viewMode
+	showSources       bool
+	showBrainTrust    bool
 	topStoriesAnalyzed   bool
 	feedsLoadedCount     int
 
@@ -78,6 +88,11 @@ type Model struct {
 	analysisPaneTop    int  // Y coordinate where analysis pane starts
 	analysisPaneBottom int  // Y coordinate where analysis pane ends
 	mouseOverAnalysis  bool // True when mouse is hovering over analysis pane
+
+	// Session tracking
+	sessionID         int64     // Current session ID for tracking
+	lastSessionTime   time.Time // When user was last active
+	showBriefingOnStart bool    // Whether to show briefing on first render
 }
 
 // New creates a new app model
@@ -100,7 +115,10 @@ func New() Model {
 
 	st, err := store.New(dbPath)
 	if err != nil {
+		logging.Error("Failed to initialize SQLite store - correlation disabled", "path", dbPath, "error", err)
 		st = nil
+	} else {
+		logging.Info("SQLite store initialized", "path", dbPath)
 	}
 
 	// Build aggregator with all sources
@@ -210,37 +228,99 @@ func New() Model {
 	// Set analysis preferences from config
 	brainTrustInstance.SetPreferences(cfg.Analysis.PreferLocal, cfg.Analysis.LocalForQuickOps)
 
+	// Initialize correlation engine (uses cheap extraction by default)
+	var correlationEngine *correlation.Engine
+	if st != nil {
+		var err error
+		correlationEngine, err = correlation.NewEngineSimple(st.DB())
+		if err != nil {
+			logging.Error("CORRELATION: Failed to initialize engine", "error", err)
+		} else {
+			logging.Info("CORRELATION: Engine initialized successfully - radar should work now")
+		}
+	} else {
+		logging.Warn("CORRELATION: No store available - correlation disabled")
+	}
+
 	// Initialize stream with persisted density
 	streamModel := stream.New()
 	if cfg.UI.DensityMode == "compact" {
 		streamModel.SetDensity(stream.DensityCompact)
 	}
+	if correlationEngine != nil {
+		streamModel.SetCorrelationEngine(correlationEngine)
+	}
+
+	// Initialize radar
+	radarModel := radar.New()
+	if correlationEngine != nil {
+		radarModel.SetEngine(correlationEngine)
+	}
+
+	// Initialize briefing
+	briefingModel := briefing.New()
+	if correlationEngine != nil {
+		briefingModel.SetEngine(correlationEngine)
+	}
+
+	// Session tracking
+	var sessionID int64
+	var lastSessionTime time.Time
+	var showBriefingOnStart bool
+	if st != nil {
+		// Get last session time
+		lastSessionTime, _ = st.GetLastSession()
+
+		// Start new session
+		sessionID, _ = st.StartSession()
+
+		// Set up briefing
+		briefingModel.SetLastSession(lastSessionTime)
+		showBriefingOnStart = briefingModel.NeedsBriefing()
+
+		logging.Info("Session started", "session_id", sessionID, "last_session", lastSessionTime, "needs_briefing", showBriefingOnStart)
+	}
 
 	return Model{
-		stream:          streamModel,
-		filterView:      filters.New(filterEngine),
-		configView:      configview.New(cfg),
-		sourcesView:     sources.New(sourceManager, feeds.DefaultRSSFeeds),
-		brainTrustPanel: braintrust.New(),
-		brainTrust:      brainTrustInstance,
-		cmdPalette:      cmdPalette,
-		filterEngine:    filterEngine,
-		sourceManager:   sourceManager,
-		aggregator:      agg,
-		store:           st,
-		config:          cfg,
-		itemCategories:  make(map[string]string),
-		mode:            modeStream,
+		stream:              streamModel,
+		filterView:          filters.New(filterEngine),
+		configView:          configview.New(cfg),
+		sourcesView:         sources.New(sourceManager, feeds.DefaultRSSFeeds),
+		radarView:           radarModel,
+		briefingView:        briefingModel,
+		brainTrustPanel:     braintrust.New(),
+		brainTrust:          brainTrustInstance,
+		cmdPalette:          cmdPalette,
+		filterEngine:        filterEngine,
+		sourceManager:       sourceManager,
+		aggregator:          agg,
+		store:               st,
+		config:              cfg,
+		correlationEngine:   correlationEngine,
+		itemCategories:      make(map[string]string),
+		mode:                modeStream,
+		sessionID:           sessionID,
+		lastSessionTime:     lastSessionTime,
+		showBriefingOnStart: showBriefingOnStart,
 	}
 }
 
 // Init initializes the app
 func (m Model) Init() tea.Cmd {
-	return tea.Batch(
+	cmds := []tea.Cmd{
 		m.refreshDueSources(),
 		m.tickRefresh(),
 		m.brainTrustPanel.Spinner().Tick,
-	)
+	}
+
+	// Show briefing on startup if needed (after a delay to let window size be set)
+	if m.showBriefingOnStart {
+		cmds = append(cmds, func() tea.Msg {
+			return ShowBriefingMsg{}
+		})
+	}
+
+	return tea.Batch(cmds...)
 }
 
 // Update handles messages
@@ -253,6 +333,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.updateConfigView(msg)
 	case modeSources:
 		return m.updateSourcesView(msg)
+	case modeRadar:
+		return m.updateRadarView(msg)
+	case modeBriefing:
+		return m.updateBriefingView(msg)
+	case modeHelp:
+		return m.updateHelpView(msg)
 	}
 
 	// Command palette takes priority when active
@@ -329,10 +415,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.store.SaveItems(msg.Items)
 			}
 
+			// Process items through correlation engine
+			// Note: This is synchronous but ProcessItems is fast for small batches
+			// TODO: Add background worker queue for large batches
+			if m.correlationEngine != nil && len(msg.Items) <= 20 {
+				m.correlationEngine.ProcessItems(msg.Items)
+			}
+
 			// Update aggregator state
 			m.aggregator.UpdateSourceState(msg.SourceName, len(msg.Items), msg.Err)
 
-			// Refresh stream view
+			// Refresh stream view (with correlation data)
 			m.updateStreamItems()
 
 			// Track feeds loaded and trigger top stories after enough feeds loaded
@@ -372,7 +465,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Update AI Analysis panel with new analysis
 		if item := m.stream.SelectedItem(); item != nil && item.ID == msg.ItemID {
 			analysis := m.brainTrust.GetAnalysis(msg.ItemID)
-			m.brainTrustPanel.SetAnalysis(msg.ItemID, analysis)
+			m.brainTrustPanel.SetAnalysis(msg.ItemID, item.Title, analysis)
 			m.showBrainTrust = true
 		}
 		return m, nil
@@ -388,6 +481,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Batch(cmd, btCmd)
 		}
 		return m, cmd
+
+	case ShowBriefingMsg:
+		// Show briefing on startup
+		if m.showBriefingOnStart && m.width > 0 {
+			m.mode = modeBriefing
+			m.briefingView.SetSize(m.width, m.height)
+			m.briefingView.SetVisible(true)
+			m.showBriefingOnStart = false
+		}
+		return m, nil
 
 	case TopStoriesMsg:
 		// Update stream with AI-identified top stories
@@ -449,7 +552,7 @@ func (m *Model) updateBrainTrustForSelectedItem() {
 	if item := m.stream.SelectedItem(); item != nil {
 		if m.brainTrust.HasAnalysis(item.ID) {
 			analysis := m.brainTrust.GetAnalysis(item.ID)
-			m.brainTrustPanel.SetAnalysis(item.ID, analysis)
+			m.brainTrustPanel.SetAnalysis(item.ID, item.Title, analysis)
 			m.showBrainTrust = true
 			m.updateAnalysisPaneBounds() // Ensure mouse detection works
 		} else {
@@ -551,6 +654,13 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.saveAndClose()
 		return m, tea.Quit
 
+	case "esc", "backspace":
+		// Clear any active filter
+		if m.stream.HasFilter() {
+			m.stream.ClearFilter()
+			return m, nil
+		}
+
 	case "up", "k":
 		m.stream.MoveUp()
 		m.updateBrainTrustForSelectedItem()
@@ -596,6 +706,12 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.mode = modeSources
 		m.sourcesView.SetSize(m.width, m.height)
 
+	case "ctrl+x":
+		// Toggle Story Radar
+		m.mode = modeRadar
+		m.radarView.SetSize(m.width, m.height)
+		m.radarView.SetVisible(true)
+
 	case "T":
 		// Trigger top stories analysis
 		logging.Info("T pressed - triggering top stories analysis")
@@ -621,7 +737,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.brainTrustPanel.Clear() // Clear any previous content
 			m.brainTrustPanel.SetVisible(true)
 			// AI panel gets max 33% of screen
-			aiHeight := min(m.height/3, 12)
+			aiHeight := min(m.height/2, 20)
 			if aiHeight < 6 {
 				aiHeight = 6
 			}
@@ -640,12 +756,34 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			)
 		}
 
+	case "A": // Shift+A for local-only analysis (LFM-instruct → LFM-transcript)
+		if item := m.stream.SelectedItem(); item != nil {
+			m.showBrainTrust = true
+			m.brainTrustPanel.Clear()
+			m.brainTrustPanel.SetVisible(true)
+			aiHeight := min(m.height/2, 20)
+			if aiHeight < 6 {
+				aiHeight = 6
+			}
+			m.brainTrustPanel.SetSize(m.width, aiHeight)
+			m.brainTrustPanel.SetLoading(item.ID, item.Title)
+			streamHeight := m.height - 4 - aiHeight
+			if m.showSources {
+				streamHeight -= 3
+			}
+			m.stream.SetSize(m.width, streamHeight)
+			return m, tea.Batch(
+				m.analyzeBrainTrustLocal(*item),
+				m.brainTrustPanel.Spinner().Tick,
+			)
+		}
+
 	case "tab":
 		// Toggle AI Analysis panel visibility
 		m.showBrainTrust = !m.showBrainTrust
 		if m.showBrainTrust {
 			// Update panel size (max 33% of screen)
-			aiHeight := min(m.height/3, 12)
+			aiHeight := min(m.height/2, 20)
 			if aiHeight < 6 {
 				aiHeight = 6
 			}
@@ -667,7 +805,10 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, m.cmdPalette.Activate()
 
 	case "?":
-		// TODO: Help overlay
+		// Show briefing (Catch Me Up)
+		m.mode = modeBriefing
+		m.briefingView.SetSize(m.width, m.height)
+		m.briefingView.SetVisible(true)
 	}
 
 	return m, nil
@@ -707,7 +848,7 @@ func (m *Model) executeCommand(cmd string) (tea.Model, tea.Cmd) {
 			m.brainTrustPanel.Clear() // Clear any previous content
 			m.brainTrustPanel.SetVisible(true)
 			// AI panel gets max 33% of screen
-			aiHeight := min(m.height/3, 12)
+			aiHeight := min(m.height/2, 20)
 			if aiHeight < 6 {
 				aiHeight = 6
 			}
@@ -732,7 +873,7 @@ func (m *Model) executeCommand(cmd string) (tea.Model, tea.Cmd) {
 		m.stream.SetTopStories(nil)
 		logging.Info("Top stories cache cleared via /clearcache command")
 	case "help":
-		// TODO: help overlay
+		m.mode = modeHelp
 	case "quit", "exit", "q":
 		m.saveAndClose()
 		return m, tea.Quit
@@ -744,6 +885,15 @@ func (m *Model) executeCommand(cmd string) (tea.Model, tea.Cmd) {
 func (m *Model) saveAndClose() {
 	if m.store == nil {
 		return
+	}
+
+	// End the session
+	if m.sessionID > 0 {
+		if err := m.store.EndSession(m.sessionID); err != nil {
+			logging.Error("Failed to end session", "error", err)
+		} else {
+			logging.Info("Session ended", "session_id", m.sessionID)
+		}
 	}
 
 	// Save top stories cache
@@ -802,6 +952,162 @@ func (m Model) updateSourcesView(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
+func (m Model) updateRadarView(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.KeyMsg:
+		switch msg.String() {
+		case "esc", "q", "ctrl+x":
+			m.mode = modeStream
+			m.radarView.SetVisible(false)
+			return m, nil
+		case "up", "k":
+			m.radarView.MoveUp()
+		case "down", "j":
+			m.radarView.MoveDown()
+		case "tab":
+			m.radarView.SwitchSection()
+		case "l":
+			m.radarView.ToggleLogFilter()
+		case "enter":
+			// Filter by selected cluster/entity
+			if m.radarView.FocusSection() == 0 {
+				// Cluster selected
+				clusterID := m.radarView.SelectedClusterID()
+				if clusterID != "" && m.correlationEngine != nil {
+					clusters := m.correlationEngine.GetActiveClusters(10)
+					for _, c := range clusters {
+						if c.ID == clusterID {
+							label := c.Summary
+							if len(label) > 30 {
+								label = label[:27] + "..."
+							}
+							m.stream.SetFilterByCluster(clusterID, "Cluster: "+label)
+							break
+						}
+					}
+				}
+			} else {
+				// Entity selected
+				entityID := m.radarView.SelectedEntityID()
+				if entityID != "" {
+					m.stream.SetFilterByEntity(entityID, "Entity: "+entityID)
+				}
+			}
+			m.mode = modeStream
+			m.radarView.SetVisible(false)
+		case "backspace", "delete":
+			// Clear filter and return
+			m.stream.ClearFilter()
+			m.mode = modeStream
+			m.radarView.SetVisible(false)
+		}
+	case tea.WindowSizeMsg:
+		m.radarView.SetSize(msg.Width, msg.Height)
+	}
+	return m, nil
+}
+
+func (m Model) updateBriefingView(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.KeyMsg:
+		switch msg.String() {
+		case "esc", "q", "enter":
+			m.mode = modeStream
+			m.briefingView.SetVisible(false)
+			return m, nil
+		case "up", "k":
+			m.briefingView.ScrollUp()
+		case "down", "j":
+			m.briefingView.ScrollDown()
+		}
+	case tea.WindowSizeMsg:
+		m.briefingView.SetSize(msg.Width, msg.Height)
+	}
+	return m, nil
+}
+
+func (m Model) updateHelpView(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.KeyMsg:
+		// Any key closes help
+		m.mode = modeStream
+		return m, nil
+	case tea.WindowSizeMsg:
+		m.width = msg.Width
+		m.height = msg.Height
+	}
+	return m, nil
+}
+
+func (m Model) renderHelpView() string {
+	titleStyle := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(lipgloss.Color("#58a6ff"))
+
+	sectionStyle := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(lipgloss.Color("#f0883e"))
+
+	keyStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#7ee787"))
+
+	descStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#8b949e"))
+
+	help := []string{
+		titleStyle.Render("  OBSERVER - Keyboard Shortcuts"),
+		"",
+		sectionStyle.Render("  Navigation"),
+		fmt.Sprintf("  %s / %s    Navigate items", keyStyle.Render("↑↓"), keyStyle.Render("jk")),
+		fmt.Sprintf("  %s        Mark item read / open URL", keyStyle.Render("Enter")),
+		fmt.Sprintf("  %s            Scroll up a page", keyStyle.Render("PgUp")),
+		fmt.Sprintf("  %s          Scroll down a page", keyStyle.Render("PgDn")),
+		"",
+		sectionStyle.Render("  AI Features"),
+		fmt.Sprintf("  %s            Analyze selected item", keyStyle.Render("a")),
+		fmt.Sprintf("  %s            Analyze top stories", keyStyle.Render("T")),
+		fmt.Sprintf("  %s          Toggle AI analysis panel", keyStyle.Render("Tab")),
+		"",
+		sectionStyle.Render("  Views"),
+		fmt.Sprintf("  %s       Story Radar (correlations)", keyStyle.Render("Ctrl+X")),
+		fmt.Sprintf("  %s            Catch Me Up briefing", keyStyle.Render("?")),
+		fmt.Sprintf("  %s            Open filter manager", keyStyle.Render("f")),
+		fmt.Sprintf("  %s            Open source manager", keyStyle.Render("S")),
+		fmt.Sprintf("  %s            Open config", keyStyle.Render("c")),
+		fmt.Sprintf("  %s            Toggle source panel", keyStyle.Render("t")),
+		"",
+		sectionStyle.Render("  Display"),
+		fmt.Sprintf("  %s            Toggle density (compact/comfortable)", keyStyle.Render("v")),
+		fmt.Sprintf("  %s            Shuffle items", keyStyle.Render("s")),
+		"",
+		sectionStyle.Render("  Actions"),
+		fmt.Sprintf("  %s            Refresh due sources", keyStyle.Render("r")),
+		fmt.Sprintf("  %s            Force refresh all", keyStyle.Render("R")),
+		fmt.Sprintf("  %s            Command mode", keyStyle.Render("/")),
+		fmt.Sprintf("  %s            Quit", keyStyle.Render("q")),
+		"",
+		sectionStyle.Render("  Commands"),
+		descStyle.Render("  /help /shuffle /refresh /density /filters /sources"),
+		descStyle.Render("  /config /panel /clearcache"),
+		"",
+		descStyle.Render("  Press any key to close"),
+	}
+
+	content := strings.Join(help, "\n")
+
+	// Center the help text
+	boxStyle := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color("#58a6ff")).
+		Padding(1, 2).
+		Width(60)
+
+	box := boxStyle.Render(content)
+
+	// Center in terminal
+	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, box)
+}
+
 func (m *Model) shuffleItems() {
 	items := m.aggregator.GetItems()
 	rand.Shuffle(len(items), func(i, j int) {
@@ -838,6 +1144,12 @@ func (m Model) View() string {
 		return m.configView.View()
 	case modeSources:
 		return m.sourcesView.View()
+	case modeRadar:
+		return m.radarView.View()
+	case modeBriefing:
+		return m.briefingView.View()
+	case modeHelp:
+		return m.renderHelpView()
 	}
 
 	// Styles
@@ -860,13 +1172,27 @@ func (m Model) View() string {
 		Padding(0, 2).
 		Width(m.width)
 
-	// Header
+	// Header with source health indicator
 	blocked := m.aggregator.BlockedCount()
-	headerText := fmt.Sprintf("◉ OBSERVER  │  %d sources  │  %d items",
-		m.aggregator.SourceCount(),
+	health := m.aggregator.GetSourceHealth()
+
+	// Show healthy/total sources with percentage if we have data
+	var sourceIndicator string
+	if health.Total > 0 && health.Healthy > 0 {
+		pct := float64(health.Healthy) / float64(health.Total) * 100
+		sourceIndicator = fmt.Sprintf("%d/%d sources (%.0f%%)", health.Healthy, health.Total, pct)
+	} else {
+		sourceIndicator = fmt.Sprintf("%d sources", m.aggregator.SourceCount())
+	}
+
+	headerText := fmt.Sprintf("◉ OBSERVER  │  %s  │  %d items",
+		sourceIndicator,
 		m.aggregator.ItemCount())
 	if blocked > 0 {
 		headerText += fmt.Sprintf("  │  %d blocked", blocked)
+	}
+	if health.Failing > 0 {
+		headerText += fmt.Sprintf("  │  %d failing", health.Failing)
 	}
 	header := headerStyle.Render(headerText)
 
@@ -1099,6 +1425,42 @@ func (m Model) analyzeBrainTrust(item feeds.Item) tea.Cmd {
 				return BrainTrustAnalysisMsg{
 					ItemID:   item.ID,
 					Analysis: brain.Analysis{Error: fmt.Errorf("analysis timed out")},
+				}
+			}
+		}
+	}
+}
+
+// analyzeBrainTrustLocal forces local-only analysis (LFM-instruct → LFM-transcript pipeline)
+func (m Model) analyzeBrainTrustLocal(item feeds.Item) tea.Cmd {
+	topStoriesContext := m.brainTrust.GetTopStoriesContext()
+
+	return func() tea.Msg {
+		m.brainTrust.ClearAnalysis(item.ID)
+
+		ctx := context.Background()
+		m.brainTrust.AnalyzeLocalWithContext(ctx, item, topStoriesContext)
+
+		ticker := time.NewTicker(300 * time.Millisecond)
+		defer ticker.Stop()
+
+		timeout := time.After(60 * time.Second) // Local should be faster
+		for {
+			select {
+			case <-ticker.C:
+				analysis := m.brainTrust.GetAnalysis(item.ID)
+				if analysis != nil && !analysis.Loading {
+					logging.Debug("Local AI analysis complete", "item", item.ID)
+					return BrainTrustAnalysisMsg{
+						ItemID:   item.ID,
+						Analysis: *analysis,
+					}
+				}
+			case <-timeout:
+				logging.Warn("Local AI analysis timed out", "item", item.Title)
+				return BrainTrustAnalysisMsg{
+					ItemID:   item.ID,
+					Analysis: brain.Analysis{Error: fmt.Errorf("local analysis timed out")},
 				}
 			}
 		}

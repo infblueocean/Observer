@@ -29,7 +29,7 @@ type Market struct {
 	CreatedAt          time.Time `json:"createdAt"`
 	EndDate            time.Time `json:"endDate"`
 	Category           string    `json:"category"`
-	Liquidity          float64   `json:"liquidity"`
+	Liquidity          json.Number `json:"liquidity"` // API returns string or number
 }
 
 // MarketResponse is the API response

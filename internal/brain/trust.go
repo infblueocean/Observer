@@ -17,13 +17,15 @@ type Analysis struct {
 	Content  string
 	Error    error
 	Loading  bool
-	Provider string // Which AI model provided this analysis
-	Stage    string // Current stage: "starting", "searching", "analyzing", "complete"
+	Provider string   // Which AI model provided this analysis
+	Stage    string   // Current stage: "starting", "searching", "analyzing", "complete"
+	Pipeline []string // Pipeline steps taken, e.g. ["Claude Sonnet 4 → analyzed"]
 }
 
 // AnalysisStore is the interface for persisting analyses
 type AnalysisStore interface {
 	SaveAnalysis(itemID, provider, model, prompt, rawResponse, content, errMsg string) error
+	GetAnalysisContent(itemID string) (content, provider, model string, found bool)
 }
 
 // Analyzer coordinates AI analysis of content
@@ -137,15 +139,20 @@ func (a *Analyzer) OnAnalysis(callback func(itemID string, analysis Analysis)) {
 // Uses two-phase approach: fast local model first (if available and preferred), then cloud model
 // AnalyzeWithContext analyzes an item with additional context (like top stories)
 func (a *Analyzer) AnalyzeWithContext(ctx context.Context, item feeds.Item, topStoriesContext string) {
-	a.analyzeInternal(ctx, item, topStoriesContext)
+	a.analyzeInternal(ctx, item, topStoriesContext, false)
+}
+
+// AnalyzeLocalWithContext forces local-only analysis (two-stage: instruct → transcript)
+func (a *Analyzer) AnalyzeLocalWithContext(ctx context.Context, item feeds.Item, topStoriesContext string) {
+	a.analyzeInternal(ctx, item, topStoriesContext, true)
 }
 
 // Analyze analyzes an item (legacy method without context)
 func (a *Analyzer) Analyze(ctx context.Context, item feeds.Item) {
-	a.analyzeInternal(ctx, item, "")
+	a.analyzeInternal(ctx, item, "", false)
 }
 
-func (a *Analyzer) analyzeInternal(ctx context.Context, item feeds.Item, topStoriesContext string) {
+func (a *Analyzer) analyzeInternal(ctx context.Context, item feeds.Item, topStoriesContext string, forceLocal bool) {
 	a.mu.RLock()
 	// Check if analysis already in progress
 	if existing, ok := a.analyses[item.ID]; ok && existing != nil && existing.Loading {
@@ -157,18 +164,38 @@ func (a *Analyzer) analyzeInternal(ctx context.Context, item feeds.Item, topStor
 	// Get local (fast) and cloud providers
 	localProvider := a.getLocalProvider()
 	cloudProvider := a.getCloudProvider()
-	preferLocal := a.preferLocal
+	callbacks := a.callbacks
 	a.mu.RUnlock()
+
+	// If forcing local but no local available, show error
+	if forceLocal && localProvider == nil {
+		logging.Info("No local model available for local-only analysis")
+		analysis := Analysis{
+			Error:    fmt.Errorf("no local model available - press 'a' for cloud analysis"),
+			Loading:  false,
+			Provider: "local",
+			Stage:    "error",
+			Pipeline: []string{"no local model found"},
+		}
+		a.mu.Lock()
+		a.analyses[item.ID] = &analysis
+		a.mu.Unlock()
+		for _, cb := range callbacks {
+			cb(item.ID, analysis)
+		}
+		return
+	}
+
+	// If forcing local, skip cloud
+	if forceLocal {
+		cloudProvider = nil
+		logging.Info("Forcing local-only analysis", "item", item.Title)
+	}
 
 	// Need at least one provider
 	if localProvider == nil && cloudProvider == nil {
 		logging.Debug("AI analysis skipped - no provider available")
 		return
-	}
-
-	// If not preferring local, skip the two-phase approach
-	if !preferLocal {
-		localProvider = nil
 	}
 
 	// Determine which provider to show initially
@@ -198,32 +225,31 @@ func (a *Analyzer) analyzeInternal(ctx context.Context, item feeds.Item, topStor
 
 	var systemPrompt string
 	if hasTopStories {
-		systemPrompt = `You are a thoughtful news analyst. Provide insightful analysis of the given news item.
+		systemPrompt = `You are a seasoned news analyst in the tradition of Dan Rather, Walter Cronkite, or Christiane Amanpour. Analyze this news with the gravitas and insight of a veteran journalist who has seen history unfold.
 
-Your analysis should include:
+Write 2-3 paragraphs covering:
+- What this means and why it matters to ordinary people
+- Historical parallels or precedents you've witnessed
+- The questions a good journalist would ask next
 
-ANALYSIS (2-3 paragraphs):
-- What this news likely means based on the headline and context
-- Historical context or precedents
-- What questions this raises or what's missing
-- Potential implications
+Then write 1 paragraph on how it connects to the current top stories.
 
-CONNECTIONS (1 paragraph):
-- How this story relates to the current top stories listed below
-- Common themes, causes, or implications across stories
-- If no meaningful connection exists, briefly note why this story stands apart
-
-Be direct and analytical. No bullet points, use flowing prose.`
+RULES:
+- Start directly with your analysis. No preamble like "Certainly" or "Here's my analysis".
+- Plain text only. No markdown, no headers, no bullet points.
+- Be direct, authoritative, and occasionally wry.`
 	} else {
-		systemPrompt = `You are a thoughtful news analyst. Provide insightful analysis of the given news item.
+		systemPrompt = `You are a seasoned news analyst in the tradition of Dan Rather, Walter Cronkite, or Christiane Amanpour. Analyze this news with the gravitas and insight of a veteran journalist who has seen history unfold.
 
-Your analysis should weave together:
-- What this news likely means based on the headline and context
-- Historical context or precedents
-- What questions this raises or what's missing
-- Potential implications and how this connects to broader trends
+Write 2-3 paragraphs covering:
+- What this means and why it matters to ordinary people
+- Historical parallels or precedents you've witnessed
+- The questions a good journalist would ask next
 
-Write 2-3 substantive paragraphs. Be direct and analytical. No fluff, no bullet points, no section headers.`
+RULES:
+- Start directly with your analysis. No preamble like "Certainly" or "Here's my analysis".
+- Plain text only. No markdown, no headers, no bullet points.
+- Be direct, authoritative, and occasionally wry.`
 	}
 
 	var userPrompt string
@@ -238,67 +264,11 @@ Write 2-3 substantive paragraphs. Be direct and analytical. No fluff, no bullet 
 	a.analyses[item.ID] = &Analysis{Loading: true, Provider: providerName, Stage: "starting"}
 	a.mu.Unlock()
 
-	// Track if cloud result already arrived (to avoid overwriting with slower local)
-	cloudDone := make(chan struct{})
-
-	// If we have both local and cloud, run local first for quick feedback
-	if localProvider != nil && cloudProvider != nil {
-		// Start local analysis (fast)
+	// If cloud is available, use it directly
+	if cloudProvider != nil {
 		go func() {
 			a.mu.Lock()
 			if existing, ok := a.analyses[item.ID]; ok {
-				existing.Stage = "local"
-				existing.Provider = "ollama (quick)"
-			}
-			a.mu.Unlock()
-
-			resp, err := localProvider.Generate(ctx, Request{
-				SystemPrompt: systemPrompt,
-				UserPrompt:   userPrompt,
-				MaxTokens:    500, // Shorter for speed
-			})
-
-			// Only update if cloud hasn't finished yet
-			select {
-			case <-cloudDone:
-				logging.Debug("Local analysis finished but cloud already done, skipping")
-				return
-			default:
-			}
-
-			if err != nil {
-				logging.Debug("Local analysis failed, waiting for cloud", "error", err)
-				return
-			}
-
-			a.mu.Lock()
-			// Only update if still loading (cloud hasn't replaced it)
-			if existing, ok := a.analyses[item.ID]; ok && existing.Loading {
-				existing.Content = strings.TrimSpace(resp.Content)
-				existing.Loading = false
-				existing.Provider = "ollama (quick)"
-				existing.Stage = "interim"
-				logging.Info("Local analysis ready (interim)", "item", item.Title)
-			}
-			callbacks := a.callbacks
-			a.mu.Unlock()
-
-			// Notify callbacks of interim result
-			for _, cb := range callbacks {
-				cb(item.ID, Analysis{
-					Content:  strings.TrimSpace(resp.Content),
-					Provider: "ollama (quick)",
-					Stage:    "interim",
-				})
-			}
-		}()
-
-		// Start cloud analysis (slower but better)
-		go func() {
-			defer close(cloudDone)
-
-			a.mu.Lock()
-			if existing, ok := a.analyses[item.ID]; ok && existing.Stage == "starting" {
 				existing.Stage = "analyzing"
 			}
 			a.mu.Unlock()
@@ -309,40 +279,84 @@ Write 2-3 substantive paragraphs. Be direct and analytical. No fluff, no bullet 
 				MaxTokens:    800,
 			})
 
-			a.runAnalysisComplete(item, cloudProvider.Name(), resp, err, userPrompt)
+			// Just show the actual model used
+			pipeline := []string{resp.Model}
+			a.runAnalysisCompleteWithPipeline(item, cloudProvider.Name(), resp, err, userPrompt, pipeline)
 		}()
-	} else {
-		// Only one provider available, use it directly
-		provider := localProvider
-		if provider == nil {
-			provider = cloudProvider
-		}
-
+	} else if localProvider != nil {
+		// Two-stage local analysis: instruct model → transcript model
 		go func() {
 			a.mu.Lock()
 			if existing, ok := a.analyses[item.ID]; ok {
 				existing.Stage = "analyzing"
+				existing.Provider = "ollama (analyzing)"
 			}
 			a.mu.Unlock()
 
-			resp, err := provider.Generate(ctx, Request{
+			var pipeline []string
+
+			// Stage 1: Get raw analysis from instruct model
+			resp, err := localProvider.Generate(ctx, Request{
 				SystemPrompt: systemPrompt,
 				UserPrompt:   userPrompt,
-				MaxTokens:    800,
+				MaxTokens:    600,
 			})
 
-			a.runAnalysisComplete(item, provider.Name(), resp, err, userPrompt)
+			// Just show the model used
+			pipeline = append(pipeline, resp.Model)
+
+			if err != nil {
+				a.runAnalysisCompleteWithPipeline(item, localProvider.Name(), resp, err, userPrompt, pipeline)
+				return
+			}
+
+			// Stage 2: Clean up with transcript model if available
+			if ollamaProvider, ok := localProvider.(*OllamaProvider); ok {
+				transcriptModel := ollamaProvider.GetTranscriptModel()
+				if transcriptModel != "" {
+					a.mu.Lock()
+					if existing, ok := a.analyses[item.ID]; ok {
+						existing.Stage = "summarizing"
+						existing.Provider = "ollama (cleaning up)"
+					}
+					a.mu.Unlock()
+
+					cleanupPrompt := `Clean up this news analysis. Remove any preamble like "Certainly" or "Here's". Remove markdown formatting (##, **, bullets). Output clean paragraphs only.
+
+Analysis to clean:
+` + resp.Content
+
+					cleanResp, cleanErr := ollamaProvider.GenerateWithModel(ctx, transcriptModel, Request{
+						SystemPrompt: "You clean up text. Output only the cleaned text, nothing else.",
+						UserPrompt:   cleanupPrompt,
+						MaxTokens:    500,
+					})
+
+					if cleanErr == nil && len(cleanResp.Content) > 50 {
+						resp.Content = cleanResp.Content
+						pipeline = append(pipeline, transcriptModel+" (cleanup)")
+					}
+				}
+			}
+
+			a.runAnalysisCompleteWithPipeline(item, "ollama", resp, nil, userPrompt, pipeline)
 		}()
 	}
+	// If neither cloud nor local available, the function returns early above
 }
 
-// runAnalysisComplete handles the completion of an analysis
+// runAnalysisComplete handles the completion of an analysis (legacy, no pipeline)
 func (a *Analyzer) runAnalysisComplete(item feeds.Item, providerName string, resp Response, err error, userPrompt string) {
+	a.runAnalysisCompleteWithPipeline(item, providerName, resp, err, userPrompt, nil)
+}
+
+// runAnalysisCompleteWithPipeline handles the completion of an analysis with pipeline tracking
+func (a *Analyzer) runAnalysisCompleteWithPipeline(item feeds.Item, providerName string, resp Response, err error, userPrompt string, pipeline []string) {
 	var analysis Analysis
 	var errMsg string
 	if err != nil {
 		logging.Error("AI analysis failed", "error", err, "provider", providerName)
-		analysis = Analysis{Error: err, Loading: false, Provider: providerName, Stage: "error"}
+		analysis = Analysis{Error: err, Loading: false, Provider: providerName, Stage: "error", Pipeline: pipeline}
 		errMsg = err.Error()
 	} else {
 		logging.Info("AI analysis raw response",
@@ -351,8 +365,9 @@ func (a *Analyzer) runAnalysisComplete(item feeds.Item, providerName string, res
 			"provider", providerName,
 			"model", resp.Model,
 			"content_len", len(resp.Content),
+			"pipeline", pipeline,
 			"raw_response", resp.RawResponse)
-		analysis = Analysis{Content: strings.TrimSpace(resp.Content), Loading: false, Provider: providerName, Stage: "complete"}
+		analysis = Analysis{Content: strings.TrimSpace(resp.Content), Loading: false, Provider: providerName, Stage: "complete", Pipeline: pipeline}
 	}
 
 	a.mu.Lock()
@@ -381,28 +396,64 @@ func (a *Analyzer) runAnalysisComplete(item feeds.Item, providerName string, res
 }
 
 // GetAnalysis returns the current analysis for an item
+// Checks in-memory cache first, then database
 func (a *Analyzer) GetAnalysis(itemID string) *Analysis {
 	a.mu.RLock()
-	defer a.mu.RUnlock()
-	if analysis, ok := a.analyses[itemID]; ok {
-		// Return a copy
+	analysis, ok := a.analyses[itemID]
+	store := a.store
+	a.mu.RUnlock()
+
+	if ok {
+		// Return a copy from memory
 		return &Analysis{
 			Content:  analysis.Content,
 			Error:    analysis.Error,
 			Loading:  analysis.Loading,
 			Provider: analysis.Provider,
 			Stage:    analysis.Stage,
+			Pipeline: analysis.Pipeline,
 		}
 	}
+
+	// Try loading from database
+	if store != nil {
+		content, provider, model, found := store.GetAnalysisContent(itemID)
+		if found && content != "" {
+			// Cache it in memory
+			analysis := &Analysis{
+				Content:  content,
+				Provider: provider,
+				Pipeline: []string{model},
+			}
+			a.mu.Lock()
+			a.analyses[itemID] = analysis
+			a.mu.Unlock()
+			return analysis
+		}
+	}
+
 	return nil
 }
 
 // HasAnalysis returns true if we have analysis for an item
+// Checks in-memory cache first, then database
 func (a *Analyzer) HasAnalysis(itemID string) bool {
 	a.mu.RLock()
-	defer a.mu.RUnlock()
 	_, ok := a.analyses[itemID]
-	return ok
+	store := a.store
+	a.mu.RUnlock()
+
+	if ok {
+		return true
+	}
+
+	// Check database
+	if store != nil {
+		_, _, _, found := store.GetAnalysisContent(itemID)
+		return found
+	}
+
+	return false
 }
 
 // ClearAnalysis removes analysis for an item
@@ -474,8 +525,8 @@ func (a *Analyzer) AnalyzeTopStories(ctx context.Context, items []feeds.Item) ([
 	a.mu.RUnlock()
 
 	if provider == nil {
-		logging.Debug("Top stories analysis skipped - no provider available")
-		return nil, nil
+		logging.Warn("Top stories analysis skipped - no AI provider configured. Check config with 'c' key.")
+		return nil, fmt.Errorf("no AI provider available - configure Ollama or set CLAUDE_API_KEY")
 	}
 
 	if len(items) == 0 {
@@ -483,6 +534,10 @@ func (a *Analyzer) AnalyzeTopStories(ctx context.Context, items []feeds.Item) ([
 	}
 
 	logging.Info("Analyzing top stories", "items", len(items), "provider", provider.Name())
+
+	// Add timeout to prevent hanging
+	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
 
 	// Build a list of headlines for analysis
 	var headlines strings.Builder
@@ -499,32 +554,26 @@ func (a *Analyzer) AnalyzeTopStories(ctx context.Context, items []feeds.Item) ([
 		headlines.WriteString(fmt.Sprintf("%d. [%s] %s\n", i+1, item.SourceName, item.Title))
 	}
 
-	systemPrompt := `You are a news editor. Identify the most important stories from the list.
+	// Prompt without examples that LLM might copy verbatim
+	systemPrompt := `You are a news editor. From the numbered headlines, pick 3-6 important stories.
 
-OUTPUT FORMAT - Use EXACTLY this format, one story per line:
-BREAKING|<number>|<short reason>
-DEVELOPING|<number>|<short reason>
-TOP|<number>|<short reason>
+Output format (one per line):
+BREAKING|<headline number>|<why important in 3-5 words>
+DEVELOPING|<headline number>|<why important in 3-5 words>
+TOP|<headline number>|<why important in 3-5 words>
 
-EXAMPLE OUTPUT (your entire response should look like this):
-BREAKING|5|Earthquake with casualties
-DEVELOPING|12|Vote counting continues
-TOP|3|Historic climate deal
+BREAKING = deaths, disasters, major events
+DEVELOPING = ongoing situations
+TOP = significant but not urgent
 
-STRICT RULES:
-- Output 3-6 lines maximum, nothing else
-- <number> = the headline number (1, 2, 3, etc.)
-- <short reason> = 3-8 words explaining why (NOT the headline text)
-- BREAKING = urgent news (deaths, disasters, emergencies)
-- DEVELOPING = ongoing situation with updates
-- TOP = important but not urgent
-- NO markdown, NO bullets, NO extra text
-- NEVER repeat headline text in the reason`
+Output ONLY the pipe-separated lines. No other text.`
+
+	userPrompt := headlines.String()
 
 	resp, err := provider.Generate(ctx, Request{
 		SystemPrompt: systemPrompt,
-		UserPrompt:   headlines.String(),
-		MaxTokens:    300,
+		UserPrompt:   userPrompt,
+		MaxTokens:    200, // Short - just need the pipe format lines
 	})
 
 	if err != nil {
@@ -558,6 +607,7 @@ STRICT RULES:
 }
 
 // generateZingersAsync generates punchy one-liners for top stories using local LLM
+// Batches all stories into a single request for efficiency
 func (a *Analyzer) generateZingersAsync(ctx context.Context, results []TopStoryResult, items []feeds.Item) {
 	a.mu.RLock()
 	localProvider := a.getLocalProvider()
@@ -574,7 +624,13 @@ func (a *Analyzer) generateZingersAsync(ctx context.Context, results []TopStoryR
 		itemMap[items[i].ID] = &items[i]
 	}
 
-	// Generate zingers for stories that need them
+	// Collect stories that need zingers
+	type storyToZinger struct {
+		result TopStoryResult
+		item   *feeds.Item
+	}
+	var needZingers []storyToZinger
+
 	for _, result := range results {
 		// Check if we already have a zinger cached
 		a.topStoriesCache.mu.RLock()
@@ -583,7 +639,7 @@ func (a *Analyzer) generateZingersAsync(ctx context.Context, results []TopStoryR
 		a.topStoriesCache.mu.RUnlock()
 
 		if hasZinger {
-			continue // Already have a zinger
+			continue
 		}
 
 		item, ok := itemMap[result.ItemID]
@@ -591,17 +647,75 @@ func (a *Analyzer) generateZingersAsync(ctx context.Context, results []TopStoryR
 			continue
 		}
 
-		// Generate zinger
-		zinger := a.generateSingleZinger(ctx, localProvider, item, result.Label)
-		if zinger == "" {
+		needZingers = append(needZingers, storyToZinger{result, item})
+	}
+
+	if len(needZingers) == 0 {
+		logging.Debug("All stories already have zingers")
+		return
+	}
+
+	// Build batched prompt
+	var sb strings.Builder
+	sb.WriteString("Create ONE punchy, informative sentence (max 15 words) for EACH story below.\n")
+	sb.WriteString("Format: number. zinger\n\n")
+
+	for i, s := range needZingers {
+		sb.WriteString(fmt.Sprintf("%d. %s (%s)\n", i+1, s.item.Title, s.item.SourceName))
+	}
+
+	sb.WriteString("\nRespond with ONLY numbered zingers, one per line:")
+
+	// Single batched request with timeout
+	zingerCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
+	defer cancel()
+
+	resp, err := localProvider.Generate(zingerCtx, Request{
+		SystemPrompt: "You create brief, informative news summaries. Output only numbered zingers, nothing else.",
+		UserPrompt:   sb.String(),
+		MaxTokens:    200,
+	})
+
+	if err != nil {
+		logging.Debug("Batched zinger generation failed", "error", err)
+		return
+	}
+
+	// Parse numbered zingers from response
+	lines := strings.Split(resp.Content, "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+
+		// Parse "1. zinger text" format
+		var num int
+		var zinger string
+		if _, err := fmt.Sscanf(line, "%d.", &num); err == nil {
+			// Extract text after "N. "
+			parts := strings.SplitN(line, ".", 2)
+			if len(parts) == 2 {
+				zinger = strings.TrimSpace(parts[1])
+			}
+		}
+
+		if zinger == "" || num < 1 || num > len(needZingers) {
+			continue
+		}
+
+		// Clean up zinger
+		zinger = strings.Trim(zinger, `"'`)
+		if len(zinger) > 120 || len(zinger) < 10 {
 			continue
 		}
 
 		// Store in cache
+		itemID := needZingers[num-1].result.ItemID
 		a.topStoriesCache.mu.Lock()
-		if cached, ok := a.topStoriesCache.entries[result.ItemID]; ok {
+		if cached, ok := a.topStoriesCache.entries[itemID]; ok {
 			cached.Zinger = zinger
-			logging.Debug("Generated zinger", "item", item.Title[:min(len(item.Title), 40)], "zinger", zinger)
+			logging.Debug("Generated zinger", "item", needZingers[num-1].item.Title[:min(len(needZingers[num-1].item.Title), 30)], "zinger", zinger)
 		}
 		a.topStoriesCache.mu.Unlock()
 	}

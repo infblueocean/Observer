@@ -6,7 +6,7 @@ import (
 
 	"github.com/abelbrown/observer/internal/feeds"
 	"github.com/abelbrown/observer/internal/logging"
-	_ "github.com/mattn/go-sqlite3"
+	_ "modernc.org/sqlite" // Pure-Go SQLite driver (no CGO required)
 )
 
 // Store handles persistence of feed items
@@ -16,7 +16,7 @@ type Store struct {
 
 // New creates a new SQLite store
 func New(dbPath string) (*Store, error) {
-	db, err := sql.Open("sqlite3", dbPath)
+	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		logging.Error("Failed to open database", "path", dbPath, "error", err)
 		return nil, err
@@ -94,8 +94,49 @@ func (s *Store) migrate() error {
 	);
 
 	CREATE INDEX IF NOT EXISTS idx_top_stories_last_seen ON top_stories_cache(last_seen DESC);
+
+	-- Session tracking
+	CREATE TABLE IF NOT EXISTS sessions (
+		id INTEGER PRIMARY KEY,
+		started_at DATETIME NOT NULL,
+		ended_at DATETIME,
+		items_viewed INTEGER DEFAULT 0
+	);
 	`
 	_, err := s.db.Exec(schema)
+	return err
+}
+
+// GetLastSession returns when the user was last active
+func (s *Store) GetLastSession() (time.Time, error) {
+	var endedAt sql.NullTime
+	err := s.db.QueryRow(`
+		SELECT ended_at FROM sessions
+		WHERE ended_at IS NOT NULL
+		ORDER BY ended_at DESC
+		LIMIT 1
+	`).Scan(&endedAt)
+	if err == sql.ErrNoRows {
+		return time.Time{}, nil
+	}
+	if err != nil {
+		return time.Time{}, err
+	}
+	return endedAt.Time, nil
+}
+
+// StartSession records a new session
+func (s *Store) StartSession() (int64, error) {
+	result, err := s.db.Exec(`INSERT INTO sessions (started_at) VALUES (?)`, time.Now())
+	if err != nil {
+		return 0, err
+	}
+	return result.LastInsertId()
+}
+
+// EndSession marks the current session as ended
+func (s *Store) EndSession(sessionID int64) error {
+	_, err := s.db.Exec(`UPDATE sessions SET ended_at = ? WHERE id = ?`, time.Now(), sessionID)
 	return err
 }
 
@@ -279,6 +320,22 @@ func (s *Store) SaveAnalysis(itemID, provider, model, prompt, rawResponse, conte
 	return nil
 }
 
+// GetAnalysisContent retrieves just the content fields for an item's analysis
+// This is the simpler interface used by brain trust
+func (s *Store) GetAnalysisContent(itemID string) (content, provider, model string, found bool) {
+	err := s.db.QueryRow(`
+		SELECT content, provider, model
+		FROM analyses
+		WHERE item_id = ? AND content != ''
+		ORDER BY created_at DESC
+		LIMIT 1
+	`, itemID).Scan(&content, &provider, &model)
+	if err != nil {
+		return "", "", "", false
+	}
+	return content, provider, model, true
+}
+
 // GetAnalysis retrieves the most recent analysis for an item
 func (s *Store) GetAnalysis(itemID string) (*AnalysisRecord, error) {
 	var record AnalysisRecord
@@ -444,6 +501,11 @@ func (s *Store) LoadTopStoriesCache() ([]TopStoryCacheEntry, error) {
 
 	logging.Debug("Top stories cache loaded", "count", len(entries))
 	return entries, nil
+}
+
+// DB returns the underlying database connection for use by other packages
+func (s *Store) DB() *sql.DB {
+	return s.db
 }
 
 // Close closes the database

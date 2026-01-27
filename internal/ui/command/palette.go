@@ -223,9 +223,13 @@ func (p Palette) View() string {
 	b.WriteString("\n")
 
 	// Divider
+	dividerWidth := p.width - 8
+	if dividerWidth < 0 {
+		dividerWidth = 0
+	}
 	b.WriteString(lipgloss.NewStyle().
 		Foreground(lipgloss.Color("#30363d")).
-		Render(strings.Repeat("─", p.width-8)))
+		Render(strings.Repeat("─", dividerWidth)))
 	b.WriteString("\n")
 
 	// Commands (max 8 visible, scrolls with cursor)

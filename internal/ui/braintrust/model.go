@@ -67,8 +67,9 @@ func (m *Model) SetSize(width, height int) {
 }
 
 // SetAnalysis updates the displayed analysis
-func (m *Model) SetAnalysis(itemID string, analysis *brain.Analysis) {
+func (m *Model) SetAnalysis(itemID string, itemTitle string, analysis *brain.Analysis) {
 	m.itemID = itemID
+	m.itemTitle = itemTitle
 	m.analysis = analysis
 	m.scrollPos = 0 // Reset scroll when content changes
 
@@ -173,13 +174,24 @@ func (m Model) View() string {
 	errorStyle := lipgloss.NewStyle().
 		Foreground(lipgloss.Color("#f85149"))
 
-	// Header with provider info
+	// Header with pipeline info
 	var header string
-	if m.analysis != nil && m.analysis.Provider != "" && !m.analysis.Loading {
+	if m.analysis != nil && !m.analysis.Loading {
 		providerStyle := lipgloss.NewStyle().
 			Foreground(lipgloss.Color("#8b949e")).
 			Italic(true)
-		header = titleStyle.Render("AI Analysis") + "  " + providerStyle.Render("via "+m.analysis.Provider)
+		pipelineStyle := lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#3fb950"))
+
+		// Show pipeline if available, otherwise just provider
+		if len(m.analysis.Pipeline) > 0 {
+			pipelineStr := strings.Join(m.analysis.Pipeline, " │ ")
+			header = titleStyle.Render("AI Analysis") + "  " + pipelineStyle.Render("["+pipelineStr+"]")
+		} else if m.analysis.Provider != "" {
+			header = titleStyle.Render("AI Analysis") + "  " + providerStyle.Render("via "+m.analysis.Provider)
+		} else {
+			header = titleStyle.Render("AI Analysis")
+		}
 	} else {
 		header = titleStyle.Render("AI Analysis")
 	}
@@ -200,9 +212,13 @@ func (m Model) View() string {
 	}
 
 	// Divider
+	dividerWidth := m.width - 8
+	if dividerWidth < 0 {
+		dividerWidth = 0
+	}
 	divider := lipgloss.NewStyle().
 		Foreground(lipgloss.Color("#30363d")).
-		Render(strings.Repeat("─", m.width-8))
+		Render(strings.Repeat("─", dividerWidth))
 
 	// Content
 	var content string
@@ -332,9 +348,9 @@ func wrapText(text string, width int) string {
 }
 
 // Legacy compatibility methods
-func (m *Model) SetAnalyses(itemID string, analyses []brain.Analysis) {
+func (m *Model) SetAnalyses(itemID string, itemTitle string, analyses []brain.Analysis) {
 	if len(analyses) > 0 {
-		m.SetAnalysis(itemID, &analyses[0])
+		m.SetAnalysis(itemID, itemTitle, &analyses[0])
 	}
 }
 

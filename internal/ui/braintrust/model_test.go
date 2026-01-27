@@ -58,7 +58,7 @@ func TestScrolling(t *testing.T) {
 
 func TestClear(t *testing.T) {
 	m := New()
-	m.SetAnalysis("item-1", &brain.Analysis{Content: "test"})
+	m.SetAnalysis("item-1", "Test Item Title", &brain.Analysis{Content: "test"})
 	m.scrollPos = 10
 
 	m.Clear()

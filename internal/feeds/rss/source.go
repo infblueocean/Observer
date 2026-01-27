@@ -19,6 +19,10 @@ type Source struct {
 	client *http.Client
 }
 
+// UserAgent is the User-Agent string used for RSS fetches
+// Using a browser-like UA because some sites (Reddit, etc.) block generic bots
+const UserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+
 // New creates a new RSS source
 func New(name, url string) *Source {
 	return &Source{
@@ -40,8 +44,16 @@ func (s *Source) Type() feeds.SourceType {
 }
 
 func (s *Source) Fetch() ([]feeds.Item, error) {
-	// Use custom HTTP client to get status code for logging
-	resp, err := s.client.Get(s.url)
+	// Create request with proper User-Agent (some sites block generic bots)
+	req, err := http.NewRequest("GET", s.url, nil)
+	if err != nil {
+		logging.Error("RSS fetch request error", "source", s.name, "url", s.url, "error", err)
+		return nil, fmt.Errorf("request error fetching %s: %w", s.name, err)
+	}
+	req.Header.Set("User-Agent", UserAgent)
+	req.Header.Set("Accept", "application/rss+xml, application/xml, text/xml, */*")
+
+	resp, err := s.client.Do(req)
 	if err != nil {
 		logging.Error("RSS fetch network error", "source", s.name, "url", s.url, "error", err)
 		return nil, fmt.Errorf("network error fetching %s: %w", s.name, err)

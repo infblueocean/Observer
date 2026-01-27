@@ -32,3 +32,13 @@ type TopStoriesMsg struct {
 	Stories []brain.TopStoryResult
 	Err     error
 }
+
+// CorrelationProcessedMsg is sent when correlation processing completes for items
+type CorrelationProcessedMsg struct {
+	ItemCount      int
+	DuplicateCount int
+	ClusterCount   int
+}
+
+// ShowBriefingMsg is sent on startup if user needs a briefing
+type ShowBriefingMsg struct{}

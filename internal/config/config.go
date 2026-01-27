@@ -75,7 +75,7 @@ func DefaultConfig() *Config {
 			Claude: ModelSettings{
 				Enabled:  true,
 				Priority: 1,
-				Model:    "claude-sonnet-4-20250514",
+				Model:    "claude-sonnet-4-5-20250929",
 			},
 			OpenAI: ModelSettings{
 				Enabled:  false,

@@ -4,10 +4,23 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/charmbracelet/log"
 )
+
+// LogEntry represents a single log entry
+type LogEntry struct {
+	Time    time.Time
+	Level   string
+	Message string
+	KeyVals []interface{}
+}
+
+// Ring buffer for recent log entries
+const maxLogEntries = 100
 
 var (
 	// Logger is the global logger instance
@@ -15,6 +28,11 @@ var (
 
 	// logFile is the file handle for the log file
 	logFile *os.File
+
+	// recentLogs is a ring buffer of recent log entries
+	recentLogs   []LogEntry
+	recentLogsMu sync.RWMutex
+	logIndex     int
 )
 
 // Init initializes the logging system
@@ -45,8 +63,85 @@ func Init() error {
 		Level:           log.DebugLevel,
 	})
 
+	// Initialize ring buffer
+	recentLogs = make([]LogEntry, maxLogEntries)
+	logIndex = 0
+
 	Logger.Info("Observer started", "version", "0.1.0")
 	return nil
+}
+
+// addToBuffer adds a log entry to the ring buffer
+func addToBuffer(level, msg string, keyvals []interface{}) {
+	recentLogsMu.Lock()
+	defer recentLogsMu.Unlock()
+
+	recentLogs[logIndex] = LogEntry{
+		Time:    time.Now(),
+		Level:   level,
+		Message: msg,
+		KeyVals: keyvals,
+	}
+	logIndex = (logIndex + 1) % maxLogEntries
+}
+
+// GetRecentLogs returns the most recent log entries (newest first)
+func GetRecentLogs(count int) []LogEntry {
+	recentLogsMu.RLock()
+	defer recentLogsMu.RUnlock()
+
+	if recentLogs == nil {
+		return nil
+	}
+
+	if count > maxLogEntries {
+		count = maxLogEntries
+	}
+
+	result := make([]LogEntry, 0, count)
+
+	// Start from most recent and go backwards
+	idx := (logIndex - 1 + maxLogEntries) % maxLogEntries
+	for i := 0; i < count; i++ {
+		entry := recentLogs[idx]
+		if entry.Time.IsZero() {
+			break // Hit uninitialized entries
+		}
+		result = append(result, entry)
+		idx = (idx - 1 + maxLogEntries) % maxLogEntries
+	}
+
+	return result
+}
+
+// FormatEntry formats a log entry for display
+func (e LogEntry) Format() string {
+	if e.Time.IsZero() {
+		return ""
+	}
+
+	// Format key-value pairs
+	var kvParts []string
+	for i := 0; i < len(e.KeyVals)-1; i += 2 {
+		key := fmt.Sprintf("%v", e.KeyVals[i])
+		val := fmt.Sprintf("%v", e.KeyVals[i+1])
+		// Truncate long values
+		if len(val) > 40 {
+			val = val[:37] + "..."
+		}
+		kvParts = append(kvParts, fmt.Sprintf("%s=%s", key, val))
+	}
+
+	kvStr := ""
+	if len(kvParts) > 0 {
+		kvStr = " " + strings.Join(kvParts, " ")
+	}
+
+	return fmt.Sprintf("%s [%s] %s%s",
+		e.Time.Format("15:04:05"),
+		e.Level,
+		e.Message,
+		kvStr)
 }
 
 // Close closes the log file
@@ -61,6 +156,7 @@ func Close() {
 
 // Info logs an info message
 func Info(msg string, keyvals ...interface{}) {
+	addToBuffer("INFO", msg, keyvals)
 	if Logger != nil {
 		Logger.Info(msg, keyvals...)
 	}
@@ -68,6 +164,7 @@ func Info(msg string, keyvals ...interface{}) {
 
 // Debug logs a debug message
 func Debug(msg string, keyvals ...interface{}) {
+	addToBuffer("DEBUG", msg, keyvals)
 	if Logger != nil {
 		Logger.Debug(msg, keyvals...)
 	}
@@ -75,6 +172,7 @@ func Debug(msg string, keyvals ...interface{}) {
 
 // Warn logs a warning message
 func Warn(msg string, keyvals ...interface{}) {
+	addToBuffer("WARN", msg, keyvals)
 	if Logger != nil {
 		Logger.Warn(msg, keyvals...)
 	}
@@ -82,6 +180,7 @@ func Warn(msg string, keyvals ...interface{}) {
 
 // Error logs an error message
 func Error(msg string, keyvals ...interface{}) {
+	addToBuffer("ERROR", msg, keyvals)
 	if Logger != nil {
 		Logger.Error(msg, keyvals...)
 	}

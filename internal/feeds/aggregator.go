@@ -255,3 +255,38 @@ func (a *Aggregator) CategoryStats() map[string]int {
 	}
 	return stats
 }
+
+// SourceHealth represents source status counts
+type SourceHealth struct {
+	Total   int // Total registered sources
+	Healthy int // Sources with no recent errors (ConsecErrors == 0)
+	Failing int // Sources with repeated errors (ConsecErrors >= 3)
+	Warning int // Sources with some errors (ConsecErrors 1-2)
+}
+
+// GetSourceHealth returns counts of healthy vs failing sources
+func (a *Aggregator) GetSourceHealth() SourceHealth {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+
+	var health SourceHealth
+	health.Total = len(a.sources)
+
+	for _, s := range a.sources {
+		// Only count sources that have been fetched at least once
+		if s.LastFetched.IsZero() {
+			continue
+		}
+
+		switch {
+		case s.ConsecErrors == 0:
+			health.Healthy++
+		case s.ConsecErrors >= 3:
+			health.Failing++
+		default:
+			health.Warning++
+		}
+	}
+
+	return health
+}
