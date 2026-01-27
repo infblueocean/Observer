@@ -40,6 +40,10 @@ observer/
 │   │   └── messages.go            # Message types
 │   ├── config/
 │   │   └── config.go              # Persistent configuration
+│   ├── correlation/               # Story correlation engine
+│   │   ├── engine.go              # Core correlation logic
+│   │   ├── types.go               # Entity, Cluster, Claim types
+│   │   └── cheap.go               # Regex-based extractors
 │   ├── curation/
 │   │   └── filter.go              # Filter engine (pattern + semantic)
 │   ├── feeds/
@@ -50,6 +54,10 @@ observer/
 │   │   ├── rss/source.go          # RSS fetcher
 │   │   ├── hackernews/source.go   # HN API client
 │   │   └── usgs/source.go         # Earthquake data
+│   ├── sampling/                  # Pluggable sampling strategies
+│   │   ├── queue.go               # SourceQueue with adaptive polling
+│   │   ├── manager.go             # QueueManager coordinates sources
+│   │   └── round_robin.go         # All sampler implementations
 │   ├── store/
 │   │   └── sqlite.go              # Persistence layer
 │   └── ui/
@@ -61,7 +69,9 @@ observer/
 │       └── styles/theme.go        # Lip Gloss styles
 ├── go.mod
 ├── go.sum
-└── CLAUDE.md                      # This file
+├── CLAUDE.md                      # This file
+├── SAMPLING_ARCHITECTURE.md       # Sampling strategies documentation
+└── CORRELATION_ENGINE.md          # Story clustering documentation
 ```
 
 ### Tech Stack
@@ -88,8 +98,36 @@ Sources (RSS, HN API, USGS)
    SQLite Store (persistence)
          │
          ▼
+   Sampling Layer (balanced exposure)
+         │
+         ▼
    Stream View (Bubble Tea)
 ```
+
+### Sampling Architecture (NEW - See SAMPLING_ARCHITECTURE.md)
+
+**Philosophy**: "Firehose to DB, curated to UI"
+- Polling stores everything (complete record)
+- Sampling controls what appears (balanced exposure)
+
+**Implemented Samplers**:
+| Sampler | Purpose | When to Use |
+|---------|---------|-------------|
+| `RoundRobinSampler` | Simple rotation | Testing, equal representation |
+| `DeficitRoundRobinSampler` | Strict long-run fairness | Front page, balanced view |
+| `FairRecentSampler` | Quotas + recency | Default stream |
+| `ThrottledRecencySampler` | Recency with caps | Breaking news |
+| `WeightedRoundRobinSampler` | Editorial control | Curated views |
+| `RecencyMergeSampler` | Pure chronological | Firehose view |
+
+**Adaptive Polling**:
+- Sources adjust polling interval based on activity
+- Found new content → speed up (×0.7, floor 30s)
+- No new content → slow down (×1.5, ceiling 15m)
+
+**Brain Trust Consultations** (2026-01-26):
+- GPT-5: Deficit Round Robin, MMR re-ranking, exposure caps
+- Grok-4: FairRecent pattern, per-source queuing architecture
 
 ### Database Schema
 

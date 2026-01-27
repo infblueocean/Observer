@@ -1,6 +1,9 @@
 package sampling
 
 import (
+	"sort"
+	"time"
+
 	"github.com/abelbrown/observer/internal/feeds"
 )
 
@@ -155,19 +158,260 @@ func (s *RecencyMergeSampler) Sample(queues []*SourceQueue, n int) []feeds.Item 
 		all = append(all, q.All()...)
 	}
 
-	// Sort by published time (newest first)
-	// Using simple bubble sort for small collections, replace with sort.Slice for larger
-	for i := 0; i < len(all)-1; i++ {
-		for j := i + 1; j < len(all); j++ {
-			if all[j].Published.After(all[i].Published) {
-				all[i], all[j] = all[j], all[i]
-			}
-		}
-	}
+	// Sort by published time (newest first) - O(n log n)
+	sort.Slice(all, func(i, j int) bool {
+		return all[i].Published.After(all[j].Published)
+	})
 
 	// Return top n
 	if n > len(all) {
 		n = len(all)
 	}
 	return all[:n]
+}
+
+// --- Advanced Samplers (from Brain Trust recommendations) ---
+
+// DeficitRoundRobinSampler provides strict long-run fairness even with bursty sources.
+// Each source accumulates "credit" (deficit) and emits items when credit >= cost.
+// Better than plain round-robin when some sources are empty then explode.
+// Recommended by GPT-5 as the best default "balanced" sampler.
+type DeficitRoundRobinSampler struct {
+	// Quantum is the credit added per round (can be weighted per-source)
+	// Higher quantum = source can emit more items per round
+	Quantum float64
+
+	// MaxPerSource caps items per source per sample (0 = no limit)
+	MaxPerSource int
+
+	// deficits tracks accumulated credit per source (by name)
+	deficits map[string]float64
+}
+
+// NewDeficitRoundRobinSampler creates a DRR sampler
+func NewDeficitRoundRobinSampler() *DeficitRoundRobinSampler {
+	return &DeficitRoundRobinSampler{
+		Quantum:      1.0,
+		MaxPerSource: 0,
+		deficits:     make(map[string]float64),
+	}
+}
+
+// Sample selects items using deficit round-robin for strict fairness
+func (s *DeficitRoundRobinSampler) Sample(queues []*SourceQueue, n int) []feeds.Item {
+	if len(queues) == 0 || n <= 0 {
+		return nil
+	}
+
+	result := make([]feeds.Item, 0, n)
+	idx := make(map[string]int) // position in each queue
+	taken := make(map[string]int) // items taken per source this sample
+
+	// Initialize deficits for new sources
+	for _, q := range queues {
+		if _, exists := s.deficits[q.Name]; !exists {
+			s.deficits[q.Name] = 0
+		}
+	}
+
+	// Keep sampling until we have enough items or exhaust all queues
+	for len(result) < n {
+		added := false
+
+		for _, q := range queues {
+			// Check per-source cap
+			if s.MaxPerSource > 0 && taken[q.Name] >= s.MaxPerSource {
+				continue
+			}
+
+			// Check if queue has more items
+			pos := idx[q.Name]
+			if pos >= q.Len() {
+				continue
+			}
+
+			// Add credit based on source weight
+			quantum := s.Quantum * q.Weight
+			s.deficits[q.Name] += quantum
+
+			// Emit items while we have credit
+			for s.deficits[q.Name] >= 1.0 && pos < q.Len() && len(result) < n {
+				item := q.Peek(pos)
+				if item != nil {
+					result = append(result, *item)
+					pos++
+					idx[q.Name] = pos
+					taken[q.Name]++
+					s.deficits[q.Name] -= 1.0
+					added = true
+
+					// Check per-source cap
+					if s.MaxPerSource > 0 && taken[q.Name] >= s.MaxPerSource {
+						break
+					}
+				}
+			}
+
+			if len(result) >= n {
+				break
+			}
+		}
+
+		// No progress = all queues exhausted or capped
+		if !added {
+			break
+		}
+	}
+
+	return result
+}
+
+// FairRecentSampler combines fairness across sources with recency preference.
+// Takes up to quota items per source from the recent window, then sorts by recency.
+// Recommended by Grok-4 as the best default for "balanced + fresh" view.
+type FairRecentSampler struct {
+	// QuotaPerSource limits items per source (default 20)
+	QuotaPerSource int
+
+	// MaxAge filters out items older than this (default 24 hours)
+	MaxAge time.Duration
+
+	// PerSourceCooldown prevents same source appearing consecutively
+	// 0 = no cooldown, >0 = minimum items between same source
+	PerSourceCooldown int
+}
+
+// NewFairRecentSampler creates a fair+recent sampler
+func NewFairRecentSampler() *FairRecentSampler {
+	return &FairRecentSampler{
+		QuotaPerSource:    20,
+		MaxAge:            24 * time.Hour,
+		PerSourceCooldown: 0,
+	}
+}
+
+// Sample selects items with fairness quotas then sorts by recency
+func (s *FairRecentSampler) Sample(queues []*SourceQueue, n int) []feeds.Item {
+	if len(queues) == 0 || n <= 0 {
+		return nil
+	}
+
+	cutoff := time.Now().Add(-s.MaxAge)
+	var candidates []feeds.Item
+
+	// Collect up to quota items per source (recent only)
+	for _, q := range queues {
+		count := 0
+		for i := 0; i < q.Len() && count < s.QuotaPerSource; i++ {
+			item := q.Peek(i)
+			if item != nil && item.Published.After(cutoff) {
+				candidates = append(candidates, *item)
+				count++
+			}
+		}
+	}
+
+	// Sort by recency (newest first)
+	sort.Slice(candidates, func(i, j int) bool {
+		return candidates[i].Published.After(candidates[j].Published)
+	})
+
+	// Apply per-source cooldown if configured
+	if s.PerSourceCooldown > 0 {
+		candidates = applySourceCooldown(candidates, s.PerSourceCooldown)
+	}
+
+	// Return top n
+	if n > len(candidates) {
+		n = len(candidates)
+	}
+	return candidates[:n]
+}
+
+// applySourceCooldown reorders items to ensure minimum spacing between same source
+func applySourceCooldown(items []feeds.Item, cooldown int) []feeds.Item {
+	if len(items) <= 1 || cooldown <= 0 {
+		return items
+	}
+
+	result := make([]feeds.Item, 0, len(items))
+	remaining := make([]feeds.Item, len(items))
+	copy(remaining, items)
+
+	lastSource := make(map[string]int) // source name -> position of last appearance
+
+	for len(remaining) > 0 && len(result) < len(items) {
+		// Find best candidate that satisfies cooldown
+		bestIdx := -1
+		for i, item := range remaining {
+			pos := len(result)
+			lastPos, seen := lastSource[item.SourceName]
+			if !seen || pos-lastPos > cooldown {
+				bestIdx = i
+				break
+			}
+		}
+
+		// If no candidate satisfies cooldown, take first anyway
+		if bestIdx < 0 {
+			bestIdx = 0
+		}
+
+		// Add to result and remove from remaining
+		item := remaining[bestIdx]
+		result = append(result, item)
+		lastSource[item.SourceName] = len(result) - 1
+		remaining = append(remaining[:bestIdx], remaining[bestIdx+1:]...)
+	}
+
+	return result
+}
+
+// ThrottledRecencySampler is a recency-first sampler with per-source caps.
+// Prevents any single source from dominating breaking news view.
+// Recommended by GPT-5 for "Recent" view.
+type ThrottledRecencySampler struct {
+	// MaxPerSource caps items per source in the result
+	MaxPerSource int
+}
+
+// NewThrottledRecencySampler creates a throttled recency sampler
+func NewThrottledRecencySampler() *ThrottledRecencySampler {
+	return &ThrottledRecencySampler{
+		MaxPerSource: 3, // reasonable default
+	}
+}
+
+// Sample returns most recent items with per-source caps
+func (s *ThrottledRecencySampler) Sample(queues []*SourceQueue, n int) []feeds.Item {
+	if len(queues) == 0 || n <= 0 {
+		return nil
+	}
+
+	// Collect all items
+	var all []feeds.Item
+	for _, q := range queues {
+		all = append(all, q.All()...)
+	}
+
+	// Sort by recency
+	sort.Slice(all, func(i, j int) bool {
+		return all[i].Published.After(all[j].Published)
+	})
+
+	// Apply per-source cap
+	result := make([]feeds.Item, 0, n)
+	sourceCounts := make(map[string]int)
+
+	for _, item := range all {
+		if sourceCounts[item.SourceName] < s.MaxPerSource {
+			result = append(result, item)
+			sourceCounts[item.SourceName]++
+			if len(result) >= n {
+				break
+			}
+		}
+	}
+
+	return result
 }
