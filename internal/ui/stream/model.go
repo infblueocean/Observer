@@ -221,44 +221,6 @@ const (
 )
 
 // Sparkline characters (8 levels)
-var sparkChars = []rune{'▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'}
-
-// renderSparkline creates a sparkline from values (0.0 - 1.0)
-func renderSparkline(values []float64, width int) string {
-	if len(values) == 0 || width <= 0 {
-		return ""
-	}
-
-	// Sample values to fit width
-	result := make([]rune, 0, width)
-	step := float64(len(values)) / float64(width)
-
-	for i := 0; i < width; i++ {
-		idx := int(float64(i) * step)
-		if idx >= len(values) {
-			idx = len(values) - 1
-		}
-		val := values[idx]
-
-		// Clamp to 0-1
-		if val < 0 {
-			val = 0
-		}
-		if val > 1 {
-			val = 1
-		}
-
-		// Map to sparkline character
-		charIdx := int(val * 7)
-		if charIdx > 7 {
-			charIdx = 7
-		}
-		result = append(result, sparkChars[charIdx])
-	}
-
-	return string(result)
-}
-
 // renderActivityIndicator shows source activity as a heartbeat
 func renderActivityIndicator(recentCount int) string {
 	// More activity = more bars
@@ -1207,35 +1169,13 @@ func (m Model) renderItem(item feeds.Item, selected bool) string {
 		}
 	}
 
-	// Cluster indicator (◐ N) with optional velocity sparkline
+	// Cluster indicator (◐ N) - shows how many sources cover this story
 	clusterIndicator := ""
 	if m.correlationEngine != nil {
 		if cluster := m.correlationEngine.GetClusterInfo(item.ID); cluster != nil {
 			if m.correlationEngine.IsClusterPrimary(item.ID) && cluster.Size > 1 {
-				// Base indicator
 				indicatorStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#58a6ff"))
-
-				// Check velocity trend
-				trend := m.correlationEngine.GetClusterVelocityTrend(cluster.ID)
-				switch trend {
-				case correlation.TrendSpiking:
-					// Hot cluster - show with fire and sparkline
-					indicatorStyle = indicatorStyle.Foreground(lipgloss.Color("#f85149")).Bold(true)
-					sparkData := m.correlationEngine.GetClusterSparklineData(cluster.ID, 5)
-					if len(sparkData) > 0 {
-						spark := renderSparkline(sparkData, 5)
-						clusterIndicator = indicatorStyle.Render(fmt.Sprintf(" 🔥◐%d %s", cluster.Size, spark))
-					} else {
-						clusterIndicator = indicatorStyle.Render(fmt.Sprintf(" 🔥◐%d", cluster.Size))
-					}
-				case correlation.TrendSteady:
-					clusterIndicator = indicatorStyle.Render(fmt.Sprintf(" ◐%d", cluster.Size))
-				case correlation.TrendFading:
-					indicatorStyle = indicatorStyle.Foreground(lipgloss.Color("#8b949e"))
-					clusterIndicator = indicatorStyle.Render(fmt.Sprintf(" ◐%d", cluster.Size))
-				default:
-					clusterIndicator = indicatorStyle.Render(fmt.Sprintf(" ◐%d", cluster.Size))
-				}
+				clusterIndicator = indicatorStyle.Render(fmt.Sprintf(" ◐%d", cluster.Size))
 			}
 		}
 	}
