@@ -473,8 +473,8 @@ func (a *Analyzer) IsAnalysisLoading(itemID string) bool {
 	return false
 }
 
-// AnalyzeRandomProvider analyzes an item using a randomly selected provider
-// This gives variety in analysis perspectives
+// AnalyzeRandomProvider analyzes an item using a randomly selected CLOUD provider
+// This gives variety in analysis perspectives (excludes local/Ollama for quality)
 func (a *Analyzer) AnalyzeRandomProvider(ctx context.Context, item feeds.Item, topStoriesContext string) {
 	a.mu.RLock()
 	// Check if analysis already in progress
@@ -484,8 +484,8 @@ func (a *Analyzer) AnalyzeRandomProvider(ctx context.Context, item feeds.Item, t
 		return
 	}
 
-	// Get a random provider from all available
-	provider := a.getRandomProvider()
+	// Get a random CLOUD provider (excludes Ollama for better quality on 'a' key)
+	provider := a.getCloudProvider()
 	a.mu.RUnlock()
 
 	if provider == nil {
