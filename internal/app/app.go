@@ -497,14 +497,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		logging.Info("TopStoriesMsg received", "stories_count", len(msg.Stories), "has_error", msg.Err != nil)
 		if msg.Err != nil {
 			logging.Error("Top stories analysis failed", "error", msg.Err)
-			m.stream.SetTopStoriesLoading(false)
+			// Reset timer but keep any existing stories visible
+			m.stream.ResetTopStoriesRefresh()
 		} else {
 			// Get the "breathing" list - merges current results with persistent cache entries
 			breathingStories := m.brainTrust.GetBreathingTopStories(msg.Stories, 8)
 
 			if len(breathingStories) == 0 {
 				logging.Info("No top stories to display (slow news day)")
-				m.stream.SetTopStoriesLoading(false)
+				// Clear stories and reset timer
+				m.stream.SetTopStories(nil)
 			} else {
 				// Convert results to TopStory structs
 				var topStories []stream.TopStory

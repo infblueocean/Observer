@@ -519,6 +519,13 @@ func (m *Model) SetTopStoriesLoading(loading bool) {
 	m.topStoriesLoading = loading
 }
 
+// ResetTopStoriesRefresh resets the refresh timer without clearing stories
+// Use this when analysis fails but we want to keep showing old stories
+func (m *Model) ResetTopStoriesRefresh() {
+	m.topStoriesLoading = false
+	m.topStoriesLastRefresh = time.Now()
+}
+
 // GetTopStories returns the current top stories
 func (m Model) GetTopStories() []TopStory {
 	return m.topStories
