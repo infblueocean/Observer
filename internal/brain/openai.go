@@ -22,7 +22,7 @@ type OpenAIProvider struct {
 // NewOpenAIProvider creates a new OpenAI provider
 func NewOpenAIProvider(apiKey, model string) *OpenAIProvider {
 	if model == "" {
-		model = "gpt-4o"
+		model = "gpt-5.2" // GPT-5.2 - latest flagship model
 	}
 	return &OpenAIProvider{
 		apiKey: apiKey,

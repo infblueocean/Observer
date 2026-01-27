@@ -22,7 +22,7 @@ type GrokProvider struct {
 // NewGrokProvider creates a new Grok provider
 func NewGrokProvider(apiKey, model string) *GrokProvider {
 	if model == "" {
-		model = "grok-beta"
+		model = "grok-4-1-fast-non-reasoning" // Grok 4.1 Fast - instant responses
 	}
 	return &GrokProvider{
 		apiKey: apiKey,

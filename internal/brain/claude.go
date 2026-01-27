@@ -24,7 +24,7 @@ type ClaudeProvider struct {
 // NewClaudeProvider creates a new Claude provider
 func NewClaudeProvider(apiKey, model string) *ClaudeProvider {
 	if model == "" {
-		model = "claude-sonnet-4-5-20250929"
+		model = "claude-sonnet-4-5-20250929" // Claude Sonnet 4.5 - fast, balanced
 	}
 	return &ClaudeProvider{
 		apiKey:    apiKey,

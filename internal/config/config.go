@@ -80,17 +80,17 @@ func DefaultConfig() *Config {
 			OpenAI: ModelSettings{
 				Enabled:  false,
 				Priority: 2,
-				Model:    "gpt-4o",
+				Model:    "gpt-5.2",
 			},
 			Gemini: ModelSettings{
 				Enabled:  false,
 				Priority: 3,
-				Model:    "gemini-2.0-flash",
+				Model:    "gemini-3-flash-preview",
 			},
 			Grok: ModelSettings{
 				Enabled:  false,
 				Priority: 4,
-				Model:    "grok-beta",
+				Model:    "grok-4-1-fast-non-reasoning",
 			},
 			Ollama: ModelSettings{
 				Enabled:  false,

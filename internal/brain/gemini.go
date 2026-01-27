@@ -22,7 +22,7 @@ type GeminiProvider struct {
 // NewGeminiProvider creates a new Gemini provider
 func NewGeminiProvider(apiKey, model string) *GeminiProvider {
 	if model == "" {
-		model = "gemini-2.0-flash"
+		model = "gemini-3-flash-preview" // Gemini 3 Flash - fast frontier-class
 	}
 	return &GeminiProvider{
 		apiKey: apiKey,
