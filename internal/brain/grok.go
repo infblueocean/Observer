@@ -36,7 +36,11 @@ func NewGrokProvider(apiKey, model string) *GrokProvider {
 }
 
 func (g *GrokProvider) Name() string {
-	return "grok"
+	// Differentiate between reasoning and non-reasoning models
+	if strings.Contains(g.model, "non-reasoning") {
+		return "grok"
+	}
+	return "grok-reasoning"
 }
 
 func (g *GrokProvider) Available() bool {

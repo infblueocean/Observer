@@ -223,11 +223,17 @@ func New() Model {
 		logging.Info("Gemini provider added", "model", cfg.Models.Gemini.Model)
 	}
 
-	// Add Grok provider (cloud)
+	// Add Grok providers (cloud) - both reasoning and non-reasoning for variety
 	if cfg.Models.Grok.Enabled && cfg.Models.Grok.APIKey != "" {
-		grokProvider := brain.NewGrokProvider(cfg.Models.Grok.APIKey, cfg.Models.Grok.Model)
-		brainTrustInstance.AddProvider(grokProvider)
-		logging.Info("Grok provider added", "model", cfg.Models.Grok.Model)
+		// Fast non-reasoning model (instant responses)
+		grokFast := brain.NewGrokProvider(cfg.Models.Grok.APIKey, "grok-4-1-fast-non-reasoning")
+		brainTrustInstance.AddProvider(grokFast)
+		logging.Info("Grok provider added", "model", "grok-4-1-fast-non-reasoning")
+
+		// Reasoning model (deeper analysis, slower)
+		grokReasoning := brain.NewGrokProvider(cfg.Models.Grok.APIKey, "grok-4-1-fast")
+		brainTrustInstance.AddProvider(grokReasoning)
+		logging.Info("Grok provider added", "model", "grok-4-1-fast (reasoning)")
 	}
 
 	// Connect store to analyzer for persistence
