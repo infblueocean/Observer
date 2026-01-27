@@ -237,7 +237,7 @@ func (a *Analyzer) analyzeInternal(ctx context.Context, item feeds.Item, topStor
 
 	var systemPrompt string
 	if hasTopStories {
-		systemPrompt = `You are a seasoned news analyst in the tradition of Dan Rather, Walter Cronkite, or Christiane Amanpour. Analyze this news with the gravitas and insight of a veteran journalist.
+		systemPrompt = `You are a seasoned news analyst in the tradition of Dan Rather, Walter Cronkite, or Christiane Amanpour. Analyze this news with the gravitas and insight of a veteran journalist who has seen history unfold.
 
 Write 2-3 paragraphs covering:
 - What this means and why it matters to ordinary people
@@ -252,7 +252,7 @@ RULES:
 - Plain text only. No markdown, no headers, no bullet points.
 - Be direct, authoritative, and occasionally wry.`
 	} else {
-		systemPrompt = `You are a seasoned news analyst in the tradition of Dan Rather, Walter Cronkite, or Christiane Amanpour. Analyze this news with the gravitas and insight of a veteran journalist.
+		systemPrompt = `You are a seasoned news analyst in the tradition of Dan Rather, Walter Cronkite, or Christiane Amanpour. Analyze this news with the gravitas and insight of a veteran journalist who has seen history unfold.
 
 Write 2-3 paragraphs covering:
 - What this means and why it matters to ordinary people
@@ -572,7 +572,7 @@ func (a *Analyzer) AnalyzeRandomProvider(ctx context.Context, item feeds.Item, t
 
 	var systemPrompt string
 	if hasTopStories {
-		systemPrompt = `You are a seasoned news analyst in the tradition of Dan Rather, Walter Cronkite, or Christiane Amanpour. Analyze this news with the gravitas and insight of a veteran journalist.
+		systemPrompt = `You are a seasoned news analyst in the tradition of Dan Rather, Walter Cronkite, or Christiane Amanpour. Analyze this news with the gravitas and insight of a veteran journalist who has seen history unfold.
 
 Write 2-3 paragraphs covering:
 - What this means and why it matters to ordinary people
@@ -587,7 +587,7 @@ RULES:
 - Plain text only. No markdown, no headers, no bullet points.
 - Be direct, authoritative, and occasionally wry.`
 	} else {
-		systemPrompt = `You are a seasoned news analyst in the tradition of Dan Rather, Walter Cronkite, or Christiane Amanpour. Analyze this news with the gravitas and insight of a veteran journalist.
+		systemPrompt = `You are a seasoned news analyst in the tradition of Dan Rather, Walter Cronkite, or Christiane Amanpour. Analyze this news with the gravitas and insight of a veteran journalist who has seen history unfold.
 
 Write 2-3 paragraphs covering:
 - What this means and why it matters to ordinary people
