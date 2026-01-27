@@ -731,9 +731,12 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "a":
 		// Trigger AI analysis on selected item with random provider
 		if item := m.stream.SelectedItem(); item != nil {
-			// Don't trigger if analysis already in progress
-			if m.brainTrust.IsAnalysisLoading(item.ID) {
-				logging.Debug("Analysis already in progress, ignoring 'a' key", "item", item.ID)
+			// Don't trigger if analysis already in progress (for any item)
+			// This prevents issues when feed updates change cursor position
+			if m.brainTrustPanel.IsLoading() {
+				logging.Debug("Analysis already in progress, ignoring 'a' key",
+					"requested_item", item.ID,
+					"loading_item", m.brainTrustPanel.GetItemID())
 				return m, nil
 			}
 
@@ -762,6 +765,13 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case "A": // Shift+A for local-only analysis (LFM-instruct → LFM-transcript)
 		if item := m.stream.SelectedItem(); item != nil {
+			// Don't trigger if analysis already in progress
+			if m.brainTrustPanel.IsLoading() {
+				logging.Debug("Analysis already in progress, ignoring 'A' key",
+					"requested_item", item.ID,
+					"loading_item", m.brainTrustPanel.GetItemID())
+				return m, nil
+			}
 			m.showBrainTrust = true
 			m.brainTrustPanel.Clear()
 			m.brainTrustPanel.SetVisible(true)

@@ -101,6 +101,16 @@ func (m Model) IsVisible() bool {
 	return m.visible
 }
 
+// IsLoading returns true if analysis is currently in progress
+func (m Model) IsLoading() bool {
+	return m.analysis != nil && m.analysis.Loading
+}
+
+// GetItemID returns the ID of the item currently being analyzed
+func (m Model) GetItemID() string {
+	return m.itemID
+}
+
 // Clear resets the panel to empty state
 func (m *Model) Clear() {
 	m.analysis = nil
