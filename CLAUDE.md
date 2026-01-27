@@ -388,7 +388,16 @@ Config stored at `~/.observer/config.json`:
 
 Keys are auto-populated from:
 1. Environment variables (CLAUDE_API_KEY, OPENAI_API_KEY, etc.)
-2. keys.sh file if available
+2. `~/src/claude/keys.sh` - source this file before running Observer
+
+**API Keys Location:** `~/src/claude/keys.sh`
+```bash
+# Expected format in keys.sh:
+export ANTHROPIC_API_KEY="sk-ant-..."
+export OPENAI_API_KEY="sk-..."
+export GOOGLE_API_KEY="..."
+export XAI_API_KEY="..."
+```
 
 ---
 

@@ -21,6 +21,7 @@ import (
 	"github.com/abelbrown/observer/internal/feeds/rss"
 	"github.com/abelbrown/observer/internal/feeds/usgs"
 	"github.com/abelbrown/observer/internal/logging"
+	"github.com/abelbrown/observer/internal/sampling"
 	"github.com/abelbrown/observer/internal/store"
 	"github.com/abelbrown/observer/internal/ui/braintrust"
 	"github.com/abelbrown/observer/internal/ui/briefing"
@@ -70,6 +71,7 @@ type Model struct {
 	filterEngine      *curation.FilterEngine
 	sourceManager     *curation.SourceManager
 	aggregator        *feeds.Aggregator
+	queueManager      *sampling.QueueManager // New: per-source queues with adaptive polling
 	store             *store.Store
 	config            *config.Config
 	correlationEngine *correlation.Engine
@@ -302,6 +304,21 @@ func New() Model {
 		logging.Info("Session started", "session_id", sessionID, "last_session", lastSessionTime, "needs_briefing", showBriefingOnStart)
 	}
 
+	// Initialize QueueManager with round-robin sampler for balanced source representation
+	qm := sampling.NewQueueManager(sampling.NewRoundRobinSampler())
+
+	// Register all sources with QueueManager (using their configured refresh intervals)
+	for _, cfg := range feeds.DefaultRSSFeeds {
+		basePoll := time.Duration(cfg.RefreshMinutes) * time.Minute
+		qm.RegisterSource(cfg.Name, feeds.SourceRSS, basePoll)
+	}
+	// Register non-RSS sources
+	qm.RegisterSource("HN Top", feeds.SourceHN, time.Duration(feeds.RefreshFast)*time.Minute)
+	qm.RegisterSource("USGS Significant", feeds.SourceUSGS, time.Duration(feeds.RefreshRealtime)*time.Minute)
+	qm.RegisterSource("USGS M4.5+", feeds.SourceUSGS, time.Duration(feeds.RefreshNormal)*time.Minute)
+	qm.RegisterSource("Polymarket", feeds.SourcePolymarket, time.Duration(feeds.RefreshNormal)*time.Minute)
+	qm.RegisterSource("Manifold", feeds.SourceManifold, time.Duration(feeds.RefreshNormal)*time.Minute)
+
 	return Model{
 		stream:              streamModel,
 		filterView:          filters.New(filterEngine),
@@ -315,6 +332,7 @@ func New() Model {
 		filterEngine:        filterEngine,
 		sourceManager:       sourceManager,
 		aggregator:          agg,
+		queueManager:        qm,
 		store:               st,
 		config:              cfg,
 		correlationEngine:   correlationEngine,
@@ -428,8 +446,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.itemCategories[item.ID] = msg.Category
 			}
 
-			// Merge new items
+			// Merge new items into aggregator (for backward compat)
 			m.aggregator.MergeItems(msg.Items)
+
+			// Add to QueueManager (new sampling architecture)
+			m.queueManager.AddItems(msg.SourceName, msg.Items)
+			m.queueManager.MarkPolled(msg.SourceName)
 
 			// Save to store
 			if m.store != nil {
@@ -1154,9 +1176,17 @@ func (m *Model) shuffleItems() {
 }
 
 func (m *Model) updateStreamItems() {
-	items := m.aggregator.GetItems()
+	// Use QueueManager for balanced sampling across sources
+	// The sampler ensures diversity - chatty sources don't dominate
+	maxItems := 500 // configurable limit
+	if m.config != nil && m.config.UI.ItemLimit > 0 {
+		maxItems = m.config.UI.ItemLimit
+	}
+
+	items := m.queueManager.Sample(maxItems)
 
 	// Sort by published time, newest first
+	// (sampler returns interleaved items, we re-sort for chronological display)
 	sort.Slice(items, func(i, j int) bool {
 		return items[i].Published.After(items[j].Published)
 	})
