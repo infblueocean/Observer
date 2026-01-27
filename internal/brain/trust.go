@@ -694,7 +694,9 @@ func (a *Analyzer) AnalyzeTopStories(ctx context.Context, items []feeds.Item) ([
 	}
 
 	// Prompt without examples that LLM might copy verbatim
-	systemPrompt := `You are a news editor. From the numbered headlines, pick 3-6 important stories.
+	systemPrompt := `You are a news editor. From the numbered headlines, pick the most important stories.
+
+IMPORTANT: You MUST select AT LEAST 3 stories. Pick 3-6 stories total.
 
 Output format (one per line):
 BREAKING|<headline number>|<why important in 3-5 words>
@@ -705,7 +707,7 @@ BREAKING = deaths, disasters, major events
 DEVELOPING = ongoing situations
 TOP = significant but not urgent
 
-Output ONLY the pipe-separated lines. No other text.`
+Output ONLY the pipe-separated lines. No other text. Remember: minimum 3 stories.`
 
 	userPrompt := headlines.String()
 
@@ -1096,6 +1098,7 @@ func (a *Analyzer) ImportTopStoriesCache(entries []TopStoryCacheEntry) {
 // GetBreathingTopStories returns the dynamic list of top stories
 // This merges current LLM results with persistent high-confidence stories from cache
 // The list grows and contracts based on what's actually happening
+// Guarantees at least minStories (3) if there are any cached stories available
 func (a *Analyzer) GetBreathingTopStories(currentResults []TopStoryResult, maxStories int) []TopStoryResult {
 	a.topStoriesCache.mu.RLock()
 	defer a.topStoriesCache.mu.RUnlock()
@@ -1103,6 +1106,7 @@ func (a *Analyzer) GetBreathingTopStories(currentResults []TopStoryResult, maxSt
 	if maxStories <= 0 {
 		maxStories = 8 // Sensible default max
 	}
+	minStories := 3 // Always try to show at least 3 stories
 
 	// Build maps for deduplication - by ID and by title prefix (to catch same story from different sources)
 	currentMap := make(map[string]*TopStoryResult)
@@ -1126,6 +1130,29 @@ func (a *Analyzer) GetBreathingTopStories(currentResults []TopStoryResult, maxSt
 	// Add all current results first
 	allStories = append(allStories, currentResults...)
 
+	// Helper to check if title is duplicate
+	isTitleDuplicate := func(title string) bool {
+		if title == "" {
+			return false
+		}
+		titleKey := strings.ToLower(title)
+		if len(titleKey) > 40 {
+			titleKey = titleKey[:40]
+		}
+		return seenTitles[titleKey]
+	}
+
+	// Helper to mark title as seen
+	markTitleSeen := func(title string) {
+		if title != "" {
+			titleKey := strings.ToLower(title)
+			if len(titleKey) > 40 {
+				titleKey = titleKey[:40]
+			}
+			seenTitles[titleKey] = true
+		}
+	}
+
 	// Add high-confidence cached stories not in current results
 	// These are stories that were consistently identified but might have been
 	// missed in this particular analysis
@@ -1134,16 +1161,9 @@ func (a *Analyzer) GetBreathingTopStories(currentResults []TopStoryResult, maxSt
 			continue // Already included by ID
 		}
 
-		// Check for title-based duplicate
-		if cached.Title != "" {
-			titleKey := strings.ToLower(cached.Title)
-			if len(titleKey) > 40 {
-				titleKey = titleKey[:40]
-			}
-			if seenTitles[titleKey] {
-				logging.Debug("Skipping duplicate title from cache", "title", cached.Title[:min(len(cached.Title), 40)])
-				continue
-			}
+		if isTitleDuplicate(cached.Title) {
+			logging.Debug("Skipping duplicate title from cache", "title", cached.Title[:min(len(cached.Title), 40)])
+			continue
 		}
 
 		// Include if: high hit count AND not too many misses
@@ -1162,20 +1182,74 @@ func (a *Analyzer) GetBreathingTopStories(currentResults []TopStoryResult, maxSt
 				MissCount: cached.MissCount,
 			})
 
-			// Mark this title as seen
-			if cached.Title != "" {
-				titleKey := strings.ToLower(cached.Title)
-				if len(titleKey) > 40 {
-					titleKey = titleKey[:40]
-				}
-				seenTitles[titleKey] = true
-			}
+			markTitleSeen(cached.Title)
 
 			logging.Debug("Including persistent story from cache",
 				"item", id,
 				"hit_count", cached.HitCount,
 				"miss_count", cached.MissCount,
 				"status", status)
+		}
+	}
+
+	// If we still don't have enough stories, lower the threshold and add more from cache
+	// This ensures we always show at least minStories when possible
+	if len(allStories) < minStories {
+		// Collect candidates with lower threshold (hit >= 1, miss <= 3)
+		type cacheCandidate struct {
+			id     string
+			cached *CachedTopStory
+		}
+		var candidates []cacheCandidate
+
+		for id, cached := range a.topStoriesCache.entries {
+			if _, inCurrent := currentMap[id]; inCurrent {
+				continue
+			}
+			if isTitleDuplicate(cached.Title) {
+				continue
+			}
+			// Already added above if hit >= 3 and miss <= 2
+			if cached.HitCount >= 3 && cached.MissCount <= 2 {
+				continue
+			}
+			// Lower threshold: any hit count, reasonable miss count
+			if cached.HitCount >= 1 && cached.MissCount <= 3 {
+				candidates = append(candidates, cacheCandidate{id, cached})
+			}
+		}
+
+		// Sort candidates by hit count descending
+		for i := 0; i < len(candidates)-1; i++ {
+			for j := i + 1; j < len(candidates); j++ {
+				if candidates[j].cached.HitCount > candidates[i].cached.HitCount {
+					candidates[i], candidates[j] = candidates[j], candidates[i]
+				}
+			}
+		}
+
+		// Add candidates until we reach minStories
+		for _, c := range candidates {
+			if len(allStories) >= minStories {
+				break
+			}
+			status := calculateStatus(c.cached.HitCount, c.cached.MissCount)
+			allStories = append(allStories, TopStoryResult{
+				ItemID:    c.cached.ItemID,
+				Label:     c.cached.Label,
+				Reason:    c.cached.Reason,
+				Zinger:    c.cached.Zinger,
+				HitCount:  c.cached.HitCount,
+				FirstSeen: c.cached.FirstSeen,
+				Streak:    false,
+				Status:    status,
+				MissCount: c.cached.MissCount,
+			})
+			markTitleSeen(c.cached.Title)
+			logging.Debug("Including story from cache (lower threshold for minimum)",
+				"item", c.id,
+				"hit_count", c.cached.HitCount,
+				"miss_count", c.cached.MissCount)
 		}
 	}
 
