@@ -50,11 +50,12 @@ func GeminiConfig() *ProviderConfig {
 
 	return &ProviderConfig{
 		Name:     "gemini",
-		Endpoint: "https://generativelanguage.googleapis.com/v1beta/models/" + model + ":generateContent?key=" + apiKey,
+		Endpoint: "https://generativelanguage.googleapis.com/v1beta/models/" + model + ":generateContent",
 		APIKey:   apiKey,
 		Model:    model,
-		// Gemini uses API key in URL, not header
-		AuthHeader:      "",
+		// Use x-goog-api-key header instead of URL query param (security best practice)
+		AuthHeader:      "x-goog-api-key",
+		AuthPrefix:      "",
 		BuildBody:       buildGeminiBody,
 		ParseResponse:   parseGeminiResponse,
 		ParseStreamLine: parseGeminiStream,
@@ -440,12 +441,8 @@ func CreateAllProvidersWithLogging(log func(msg string, args ...any)) []*HTTPPro
 			}
 		} else {
 			if log != nil {
-				hasKey := cfg.APIKey != ""
-				keyPrefix := ""
-				if hasKey && len(cfg.APIKey) > 10 {
-					keyPrefix = cfg.APIKey[:10] + "..."
-				}
-				log("Provider skipped - not available", "name", cfg.Name, "has_api_key", hasKey, "key_prefix", keyPrefix)
+				// Only log whether key exists, never log key content (security)
+				log("Provider skipped - not available", "name", cfg.Name, "has_api_key", cfg.APIKey != "")
 			}
 		}
 	}

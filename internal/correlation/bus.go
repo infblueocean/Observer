@@ -2,6 +2,7 @@ package correlation
 
 import (
 	"context"
+	"sync"
 
 	"github.com/abelbrown/observer/internal/feeds"
 )
@@ -19,8 +20,9 @@ type Bus struct {
 	Results chan CorrelationEvent
 
 	// Control
-	ctx    context.Context
-	cancel context.CancelFunc
+	ctx      context.Context
+	cancel   context.CancelFunc
+	closeOnce sync.Once
 }
 
 // NewBus creates a new event bus with the specified buffer size.
@@ -39,11 +41,21 @@ func (b *Bus) Start(ctx context.Context) {
 	b.ctx, b.cancel = context.WithCancel(ctx)
 }
 
-// Stop cancels all bus operations.
+// Stop cancels all bus operations and closes all channels.
+// Safe to call multiple times.
 func (b *Bus) Stop() {
 	if b.cancel != nil {
 		b.cancel()
 	}
+	b.closeOnce.Do(func() {
+		// Close internal pipeline channels first
+		close(b.items)
+		close(b.deduped)
+		close(b.enriched)
+		close(b.clustered)
+		// Close output channel last
+		close(b.Results)
+	})
 }
 
 // Send is non-blocking - drops if the results channel is full.

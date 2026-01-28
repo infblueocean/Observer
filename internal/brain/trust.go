@@ -321,6 +321,9 @@ RULES:
 					a.mu.Lock()
 					a.analyses[item.ID] = &analysis
 					a.mu.Unlock()
+					for _, cb := range callbacks {
+						cb(item.ID, analysis)
+					}
 				}
 			}()
 
@@ -378,6 +381,9 @@ RULES:
 					a.mu.Lock()
 					a.analyses[item.ID] = &analysis
 					a.mu.Unlock()
+					for _, cb := range callbacks {
+						cb(item.ID, analysis)
+					}
 				}
 			}()
 
@@ -670,6 +676,9 @@ RULES:
 				a.mu.Lock()
 				a.analyses[item.ID] = &analysis
 				a.mu.Unlock()
+				for _, cb := range callbacks {
+					cb(item.ID, analysis)
+				}
 			}
 		}()
 

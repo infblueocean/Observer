@@ -386,6 +386,14 @@ func (p *Pool) Snapshot() Snapshot {
 
 // copyItem creates a shallow copy of an Item (sufficient for UI display).
 // Does not copy workFn, progressFn, or heapIndex as they are internal.
+//
+// IMPORTANT: Data is shallow copied for performance reasons. This is safe because:
+//  1. Data is only written once, before work completion (in SubmitWithData wrapper)
+//  2. After completion, Data is treated as immutable (read-only)
+//  3. Consumers (UI, subscribers) must NOT mutate the Data field
+//
+// If deep copying becomes necessary, implement a DataCopier interface or use
+// reflection, but the current contract is: Data is immutable after work completion.
 func copyItem(item *Item) *Item {
 	if item == nil {
 		return nil
@@ -402,7 +410,7 @@ func copyItem(item *Item) *Item {
 		ProgressMsg: item.ProgressMsg,
 		Result:      item.Result,
 		Error:       item.Error,
-		Data:        item.Data, // Note: Data itself is not deep copied
+		Data:        item.Data, // Shallow copy - see function doc for immutability contract
 		Source:      item.Source,
 		Category:    item.Category,
 		Priority:    item.Priority,
