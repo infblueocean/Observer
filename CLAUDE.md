@@ -494,6 +494,96 @@ All async operations flow through a single work pool for visibility and control.
 └──────────────────────────────────────────┘
 ```
 
+### 16. Parallel Reranker (v0.4)
+
+Replaced "fake batching" (stuffing N headlines in one prompt) with proper parallel requests.
+
+**Why parallel is better:**
+- Ollama's `/api/generate` is one prompt → one response
+- Parallel requests let Ollama batch internally on GPU
+- Simpler prompts = more reliable score parsing
+- One failure doesn't break the whole batch
+
+**Architecture:**
+```
+200 docs → 200 goroutines → semaphore (32 concurrent) → Ollama GPU batching
+```
+
+**Implementation (`internal/rerank/ollama.go`):**
+```go
+// Semaphore for concurrency control
+sem := make(chan struct{}, 32)  // 32 parallel requests
+
+for i, doc := range docs {
+    go func(idx int, document string) {
+        sem <- struct{}{}        // Acquire
+        defer func() { <-sem }() // Release
+
+        score := scoreOne(ctx, query, document)
+        scores[idx] = score
+    }(i, doc)
+}
+```
+
+**Per-document prompt:**
+```
+Rate the relevance of this headline to the topic.
+Topic: Most important breaking news...
+
+Headline: Fed Raises Interest Rates by 0.25%
+
+Reply with ONLY a number from 0-10.
+Score:
+```
+
+**Settings:**
+| Setting | Value |
+|---------|-------|
+| Concurrency | 32 parallel requests |
+| Per-request timeout | 30s |
+| num_predict | 10 tokens |
+
+### 17. Status Bar Reranking Display (v0.4)
+
+Shows reranking progress in the top status bar with animated spinner, count, and elapsed time.
+
+**Display format:**
+```
+◉ OBSERVER │ 45 sources │ 12,847 items │ ● ranking 150 [3s]
+```
+
+**Components:**
+- `●` - Animated spinner (from bubbles)
+- `150` - Number of items being reranked
+- `[3s]` - Elapsed time since reranking started
+
+**Implementation:**
+- `stream.Model.rerankingCount` - Item count
+- `stream.Model.rerankingStartTime` - Start timestamp
+- `stream.GetRerankingElapsed()` - Returns seconds elapsed
+- Count set via work event when `TypeRerank` starts
+- Cleared when reranking completes
+
+### 18. Work View Fresh Completions (v0.4)
+
+Fast jobs now stay visible with highlighting for 3 seconds after completion.
+
+**Problem:** Reranking jobs complete so fast you can't see them in `/w`.
+
+**Solution:** Highlight recently completed items (< 3 seconds) in bright green bold.
+
+**Styles:**
+```go
+// Fresh completion - bright green, stands out
+freshCompleteStyle = lipgloss.NewStyle().
+    Foreground(lipgloss.Color("#3fb950")).
+    Bold(true)
+```
+
+**Display:**
+- Fresh (< 3s): `[✓] ▲ Reranking 150 headlines  ranked 150 items  just now`
+- Older: `[✓] ▲ Reranking 150 headlines  ranked 150 items  5s ago`
+
 ---
 
 ## Configuration
@@ -624,6 +714,36 @@ export XAI_API_KEY="..."
 - [x] Top stories refresh runs in background (any view)
 - [x] Smooth UX during refresh (stories stay visible)
 - [x] Status bar indicator for background work
+
+### v0.4 Parallel Reranker (DONE)
+- [x] Parallel single-pair requests (32 concurrent goroutines)
+- [x] Ollama batches internally on GPU for efficiency
+- [x] Simpler per-doc prompt, reliable score parsing
+- [x] Status bar shows spinner + count + elapsed time
+- [x] Work view highlights fresh completions (< 3s)
+- [x] Spinner ticks forwarded properly in work view
+
+### v0.5 Reranking Feed Selection (TODO)
+Fix feedback loop bug where reranking selects from already-ranked items.
+
+**Current (broken):**
+```
+m.stream.GetRecentItems(6)  →  items sorted by PREVIOUS ranking
+items[:200]                 →  same "top 200" re-ranked repeatedly
+```
+
+**Fixed:**
+```
+m.aggregator.GetItems()     →  raw items from all sources
+filter to last 6 hours      →  recency filter
+sort by Published time      →  newest first
+items[:200]                 →  NEWEST 200 get ranked
+```
+
+- [ ] Get items from aggregator (not pre-sorted stream)
+- [ ] Sort by publish time before selecting
+- [ ] Ensure new items always get chance to rank
+- [ ] Consider: pure Go reranker via hugot/ONNX (no Ollama dependency)
 
 ### Correlation Engine (NEW - See CORRELATION_ENGINE.md)
 *"Don't curate. Illuminate."*
