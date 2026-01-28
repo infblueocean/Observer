@@ -8,6 +8,7 @@ import (
 
 	"github.com/abelbrown/observer/internal/correlation"
 	"github.com/abelbrown/observer/internal/feeds"
+	"github.com/abelbrown/observer/internal/selection"
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/harmonica"
 	"github.com/charmbracelet/lipgloss"
@@ -80,123 +81,38 @@ var sourceAbbrevs = map[string]string{
 	"Input Mag":          "Input",
 }
 
-// Time bands for grouping
-type timeBand int
-
-const (
-	bandJustNow   timeBand = iota // < 10 minutes
-	bandPastHour                  // < 1 hour
-	bandToday                     // < 24 hours
-	bandYesterday                 // < 48 hours
-	bandOlder                     // everything else
-)
-
-func getTimeBand(published time.Time) timeBand {
-	age := time.Since(published)
-	switch {
-	case age < 10*time.Minute:
-		return bandJustNow
-	case age < time.Hour:
-		return bandPastHour
-	case age < 24*time.Hour:
-		return bandToday
-	case age < 48*time.Hour:
-		return bandYesterday
-	default:
-		return bandOlder
-	}
-}
-
-func bandLabel(band timeBand) string {
-	switch band {
-	case bandJustNow:
-		return "Just Now"
-	case bandPastHour:
-		return "Past Hour"
-	case bandToday:
-		return "Earlier Today"
-	case bandYesterday:
-		return "Yesterday"
-	case bandOlder:
-		return "Older"
-	}
-	return ""
-}
-
-// interleaveWithinBands reorders items so sources are spread evenly within each time band
+// interleaveBySource spreads sources evenly for diversity.
 // Instead of: [A1, A2, A3, B1, B2, C1] (chronological clusters)
 // Produces:   [A1, B1, C1, A2, B2, A3] (interleaved by source)
-// Also caps items per band to fixed slots for predictable layout
-func interleaveWithinBands(items []feeds.Item) []feeds.Item {
+func interleaveBySource(items []feeds.Item, maxPerSource int) []feeds.Item {
 	if len(items) == 0 {
 		return items
 	}
 
-	// Fixed slots per time band - predictable layout regardless of feed volume
-	maxItemsByBand := map[timeBand]int{
-		bandJustNow:    10, // Latest breaking news
-		bandPastHour:   20, // Recent developments
-		bandToday:      10, // Earlier today highlights
-		bandYesterday:  5,  // Yesterday's notable
-		bandOlder:      3,  // Archive samples
-	}
-
-	// Max items per source within a band - ensures diversity
-	maxPerSourceByBand := map[timeBand]int{
-		bandJustNow:    3, // Don't let one source dominate breaking
-		bandPastHour:   3, // Spread across sources
-		bandToday:      2, // Limit repetition
-		bandYesterday:  1, // One per source max
-		bandOlder:      1, // One representative each
-	}
-
-	// Group items by time band
-	bandItems := make(map[timeBand][]feeds.Item)
+	// Group by source
+	sourceItems := make(map[string][]feeds.Item)
+	var sourceOrder []string // preserve first-seen order
 	for _, item := range items {
-		band := getTimeBand(item.Published)
-		bandItems[band] = append(bandItems[band], item)
+		if _, exists := sourceItems[item.SourceName]; !exists {
+			sourceOrder = append(sourceOrder, item.SourceName)
+		}
+		sourceItems[item.SourceName] = append(sourceItems[item.SourceName], item)
 	}
 
-	// Interleave items within each band, respecting both limits
+	// Round-robin through sources
 	result := make([]feeds.Item, 0, len(items))
-	for _, band := range []timeBand{bandJustNow, bandPastHour, bandToday, bandYesterday, bandOlder} {
-		bandList := bandItems[band]
-		if len(bandList) == 0 {
-			continue
-		}
-
-		maxItems := maxItemsByBand[band]
-		maxPerSource := maxPerSourceByBand[band]
-
-		// Group by source within this band
-		sourceItems := make(map[string][]feeds.Item)
-		var sourceOrder []string // preserve first-seen order of sources
-		for _, item := range bandList {
-			if _, exists := sourceItems[item.SourceName]; !exists {
-				sourceOrder = append(sourceOrder, item.SourceName)
-			}
-			sourceItems[item.SourceName] = append(sourceItems[item.SourceName], item)
-		}
-
-		// Round-robin through sources, respecting both limits
-		bandResult := make([]feeds.Item, 0, maxItems)
-		sourceIdx := make(map[string]int)
-		moreToAdd := true
-		for moreToAdd && len(bandResult) < maxItems {
-			moreToAdd = false
-			for _, source := range sourceOrder {
-				if len(bandResult) >= maxItems {
-					break
-				}
-				idx := sourceIdx[source]
-				if idx < len(sourceItems[source]) && idx < maxPerSource {
-					bandResult = append(bandResult, sourceItems[source][idx])
-					sourceIdx[source]++
-					moreToAdd = true
-				}
+	sourceIdx := make(map[string]int)
+	moreToAdd := true
+	for moreToAdd {
+		moreToAdd = false
+		for _, source := range sourceOrder {
+			idx := sourceIdx[source]
+			if idx < len(sourceItems[source]) && idx < maxPerSource {
+				result = append(result, sourceItems[source][idx])
+				sourceIdx[source]++
+				moreToAdd = true
 			}
 		}
-		result = append(result, bandResult...)
 	}
 
 	return result
@@ -265,7 +181,6 @@ const TopStoriesRefreshInterval = 30 * time.Second
 // Model is the stream view showing feed items flowing by
 type Model struct {
 	items        []feeds.Item
-	itemBands    map[string]timeBand       // item ID -> cached time band (set at load time)
 	categories   map[string]string         // item ID -> category lookup
 	cursor       int
 	selectedID   string                    // Track selected item ID for stability during updates
@@ -282,7 +197,11 @@ type Model struct {
 	// Correlation engine for duplicate/cluster indicators
 	correlationEngine *correlation.Engine
 
-	// Filtering
+	// Selection (time filter, source filter, etc.)
+	activeSelector  selection.Selector // Current view filter (nil = all)
+	selectorIndex   int                // Which preset is active (0=all, 1=just now, etc.)
+
+	// Filtering by entity/cluster (from correlation)
 	filterEntityID  string // Filter to show only items with this entity
 	filterClusterID string // Filter to show only items in this cluster
 	filterLabel     string // Human-readable filter description
@@ -306,7 +225,6 @@ func New() Model {
 
 	return Model{
 		items:        make([]feeds.Item, 0),
-		itemBands:    make(map[string]timeBand),
 		categories:   make(map[string]string),
 		loading:      true,
 		spinner:      s,
@@ -314,6 +232,34 @@ func New() Model {
 		sourceStats:  make(map[string]sourceActivity),
 		scrollSpring: spring,
 	}
+}
+
+// SetSelector sets the active time/source selector
+func (m *Model) SetSelector(sel selection.Selector, index int) {
+	m.activeSelector = sel
+	m.selectorIndex = index
+}
+
+// GetSelectorIndex returns the current selector index
+func (m Model) GetSelectorIndex() int {
+	return m.selectorIndex
+}
+
+// CycleSelector cycles through built-in time selectors
+func (m *Model) CycleSelector() {
+	selectors := []selection.Selector{nil} // nil = All
+	selectors = append(selectors, selection.TimeSelectors()...)
+
+	m.selectorIndex = (m.selectorIndex + 1) % len(selectors)
+	m.activeSelector = selectors[m.selectorIndex]
+}
+
+// GetSelectorName returns the current selector name
+func (m Model) GetSelectorName() string {
+	if m.activeSelector == nil {
+		return "All"
+	}
+	return m.activeSelector.Name()
 }
 
 // ToggleDensity switches between compact and comfortable modes
@@ -360,9 +306,8 @@ func (m *Model) SetItems(items []feeds.Item) {
 		previousSelectedID = m.selectedID
 	}
 
-	// Interleave sources within time bands for uniform sampling
-	// This prevents clusters of items from the same source
-	m.items = interleaveWithinBands(items)
+	// Interleave sources for diversity (no time band grouping)
+	m.items = interleaveBySource(items, 50) // Max 50 items per source total
 	m.loading = false
 
 	// Try to restore cursor to the same item (by ID) after update
@@ -383,13 +328,6 @@ func (m *Model) SetItems(items []feeds.Item) {
 		m.cursor = max(0, len(m.items)-1)
 	}
 
-	// Cache time bands at load time to avoid band drift during render
-	// Without this, items can change bands between when they're grouped and when they're rendered
-	m.itemBands = make(map[string]timeBand)
-	for _, item := range m.items {
-		m.itemBands[item.ID] = getTimeBand(item.Published)
-	}
-
 	// Calculate source activity stats
 	m.sourceStats = make(map[string]sourceActivity)
 	oneHourAgo := time.Now().Add(-time.Hour)
@@ -402,11 +340,6 @@ func (m *Model) SetItems(items []feeds.Item) {
 			stats.lastSeen = item.Published
 		}
 		m.sourceStats[item.SourceName] = stats
-	}
-
-	// Auto-switch to compact mode on small terminals
-	if m.height > 0 && m.height < 30 && m.density != DensityCompact {
-		m.density = DensityCompact
 	}
 }
 
@@ -604,30 +537,38 @@ func (m Model) FilterLabel() string {
 
 // getFilteredItems returns items matching the current filter
 func (m Model) getFilteredItems() []feeds.Item {
-	if !m.HasFilter() || m.correlationEngine == nil {
-		return m.items
+	items := m.items
+
+	// Apply time/source selector first
+	if m.activeSelector != nil {
+		items = selection.Apply(items, m.activeSelector)
 	}
 
-	var filtered []feeds.Item
-	for _, item := range m.items {
-		if m.filterEntityID != "" {
-			// Check if item has this entity
-			entities := m.correlationEngine.GetItemEntities(item.ID)
-			for _, e := range entities {
-				if e.ID == m.filterEntityID {
+	// Apply entity/cluster filter if set
+	if m.HasFilter() && m.correlationEngine != nil {
+		var filtered []feeds.Item
+		for _, item := range items {
+			if m.filterEntityID != "" {
+				// Check if item has this entity
+				entities := m.correlationEngine.GetItemEntities(item.ID)
+				for _, e := range entities {
+					if e.ID == m.filterEntityID {
+						filtered = append(filtered, item)
+						break
+					}
+				}
+			} else if m.filterClusterID != "" {
+				// Check if item is in this cluster
+				cluster := m.correlationEngine.GetClusterInfo(item.ID)
+				if cluster != nil && cluster.ID == m.filterClusterID {
 					filtered = append(filtered, item)
-					break
 				}
 			}
-		} else if m.filterClusterID != "" {
-			// Check if item is in this cluster
-			cluster := m.correlationEngine.GetClusterInfo(item.ID)
-			if cluster != nil && cluster.ID == m.filterClusterID {
-				filtered = append(filtered, item)
-			}
 		}
+		items = filtered
 	}
-	return filtered
+
+	return items
 }
 
 // SetLoading sets the loading state
@@ -980,28 +921,7 @@ func (m Model) renderItemsOnly(headerHeight int) string {
 	}
 	var allBlocks []renderedBlock
 
-	currentBand := timeBand(-1)
 	for i, item := range items {
-		// Use cached band to avoid drift between grouping time and render time
-		band, ok := m.itemBands[item.ID]
-		if !ok {
-			band = getTimeBand(item.Published) // Fallback for items not in cache
-		}
-
-		// Add time band divider if band changed (skip in compact mode)
-		if band != currentBand && m.density != DensityCompact {
-			if currentBand != -1 {
-				// Blank line before new band (breathing room)
-				allBlocks = append(allBlocks, renderedBlock{[]string{""}, -1})
-			}
-			// Time band divider
-			divider := m.renderTimeBandDivider(band)
-			allBlocks = append(allBlocks, renderedBlock{[]string{divider}, -1})
-			currentBand = band
-		} else if m.density != DensityCompact {
-			currentBand = band
-		}
-
 		// In compact mode, skip rendering read items fully - just show minimal
 		if m.density == DensityCompact && item.Read && i != m.cursor {
 			// Ultra-minimal read item
@@ -1057,7 +977,7 @@ func (m Model) renderItemsOnly(headerHeight int) string {
 		lines = append(lines, allLines[i].content)
 	}
 
-	// Scroll indicator with density mode
+	// Scroll indicator with density mode and active selector
 	scrollInfo := ""
 	if len(m.items) > 0 {
 		pct := float64(m.cursor) / float64(max(1, len(m.items)-1)) * 100
@@ -1065,9 +985,14 @@ func (m Model) renderItemsOnly(headerHeight int) string {
 		if m.density == DensityCompact {
 			densityIndicator = "◎" // compact
 		}
+		// Show active selector if one is set
+		selectorInfo := ""
+		if m.activeSelector != nil {
+			selectorInfo = fmt.Sprintf(" [%s]", m.activeSelector.Name())
+		}
 		scrollInfo = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("#484f58")).
-			Render(fmt.Sprintf(" %s %d/%d (%.0f%%)", densityIndicator, m.cursor+1, len(m.items), pct))
+			Render(fmt.Sprintf(" %s %d/%d (%.0f%%)%s", densityIndicator, m.cursor+1, len(m.items), pct, selectorInfo))
 	}
 
 	content := strings.Join(lines, "\n")
@@ -1076,32 +1001,6 @@ func (m Model) renderItemsOnly(headerHeight int) string {
 	}
 
 	return content
-}
-
-func (m Model) renderTimeBandDivider(band timeBand) string {
-	label := bandLabel(band)
-
-	// Style: muted, unobtrusive
-	labelStyle := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("#484f58"))
-
-	lineStyle := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("#30363d"))
-
-	// Calculate line widths
-	labelWidth := len(label) + 2 // padding
-	totalWidth := m.width - 4
-	leftLineWidth := 3
-	rightLineWidth := totalWidth - leftLineWidth - labelWidth
-	if rightLineWidth < 0 {
-		rightLineWidth = 0
-	}
-
-	leftLine := lineStyle.Render(strings.Repeat("─", leftLineWidth))
-	rightLine := lineStyle.Render(strings.Repeat("─", rightLineWidth))
-	labelText := labelStyle.Render(" " + label + " ")
-
-	return fmt.Sprintf("  %s%s%s", leftLine, labelText, rightLine)
 }
 
 func (m Model) renderItem(item feeds.Item, selected bool) string {

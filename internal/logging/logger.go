@@ -76,6 +76,11 @@ func addToBuffer(level, msg string, keyvals []interface{}) {
 	recentLogsMu.Lock()
 	defer recentLogsMu.Unlock()
 
+	// Skip if logging not initialized (e.g., in tests)
+	if recentLogs == nil {
+		return
+	}
+
 	recentLogs[logIndex] = LogEntry{
 		Time:    time.Now(),
 		Level:   level,

@@ -450,6 +450,11 @@ export XAI_API_KEY="..."
 | `tab` | Toggle AI analysis panel |
 | `s` | Shuffle items |
 | `v` | Toggle density (compact/comfortable) |
+| `1` | All items (clear time filter) |
+| `2` | Just Now (<15 min) |
+| `3` | Past Hour |
+| `4` | Today (<24h) |
+| `5` | Yesterday (24-48h) |
 | `f` | Open filter manager |
 | `S` | Open source manager |
 | `c` | Open config |

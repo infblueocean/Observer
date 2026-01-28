@@ -22,6 +22,7 @@ import (
 	"github.com/abelbrown/observer/internal/feeds/usgs"
 	"github.com/abelbrown/observer/internal/logging"
 	"github.com/abelbrown/observer/internal/sampling"
+	"github.com/abelbrown/observer/internal/selection"
 	"github.com/abelbrown/observer/internal/store"
 	"github.com/abelbrown/observer/internal/ui/braintrust"
 	"github.com/abelbrown/observer/internal/ui/briefing"
@@ -907,6 +908,30 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.config.Save()
 
+	case "1":
+		// All items (no time selector)
+		m.stream.SetSelector(nil, 0)
+
+	case "2":
+		// Just Now (<15min)
+		selectors := selection.TimeSelectors()
+		m.stream.SetSelector(selectors[0], 1) // JustNow
+
+	case "3":
+		// Past Hour
+		selectors := selection.TimeSelectors()
+		m.stream.SetSelector(selectors[1], 2) // PastHour
+
+	case "4":
+		// Today
+		selectors := selection.TimeSelectors()
+		m.stream.SetSelector(selectors[2], 3) // Today
+
+	case "5":
+		// Yesterday
+		selectors := selection.TimeSelectors()
+		m.stream.SetSelector(selectors[3], 4) // Yesterday
+
 	case "a":
 		// Trigger AI analysis on selected item with cloud provider (streaming)
 		if item := m.stream.SelectedItem(); item != nil {
@@ -1288,6 +1313,13 @@ func (m Model) renderHelpView() string {
 		sectionStyle.Render("  Display"),
 		fmt.Sprintf("  %s            Toggle density (compact/comfortable)", keyStyle.Render("v")),
 		fmt.Sprintf("  %s            Shuffle items", keyStyle.Render("s")),
+		"",
+		sectionStyle.Render("  Time Filters"),
+		fmt.Sprintf("  %s            All items (no filter)", keyStyle.Render("1")),
+		fmt.Sprintf("  %s            Just Now (<15min)", keyStyle.Render("2")),
+		fmt.Sprintf("  %s            Past Hour", keyStyle.Render("3")),
+		fmt.Sprintf("  %s            Today (<24h)", keyStyle.Render("4")),
+		fmt.Sprintf("  %s            Yesterday (24-48h)", keyStyle.Render("5")),
 		"",
 		sectionStyle.Render("  Actions"),
 		fmt.Sprintf("  %s            Refresh due sources", keyStyle.Render("r")),

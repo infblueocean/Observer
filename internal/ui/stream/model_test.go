@@ -9,60 +9,10 @@ import (
 	"github.com/abelbrown/observer/internal/feeds"
 )
 
-func TestGetTimeBand(t *testing.T) {
+func TestInterleaveBySource(t *testing.T) {
 	now := time.Now()
 
-	tests := []struct {
-		name      string
-		published time.Time
-		expected  timeBand
-	}{
-		{"just now", now.Add(-5 * time.Minute), bandJustNow},
-		{"9 minutes ago", now.Add(-9 * time.Minute), bandJustNow},
-		{"11 minutes ago", now.Add(-11 * time.Minute), bandPastHour},
-		{"30 minutes ago", now.Add(-30 * time.Minute), bandPastHour},
-		{"2 hours ago", now.Add(-2 * time.Hour), bandToday},
-		{"12 hours ago", now.Add(-12 * time.Hour), bandToday},
-		{"30 hours ago", now.Add(-30 * time.Hour), bandYesterday},
-		{"3 days ago", now.Add(-72 * time.Hour), bandOlder},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := getTimeBand(tt.published)
-			if got != tt.expected {
-				t.Errorf("getTimeBand(%v) = %v, want %v", tt.name, got, tt.expected)
-			}
-		})
-	}
-}
-
-func TestBandLabel(t *testing.T) {
-	tests := []struct {
-		band     timeBand
-		expected string
-	}{
-		{bandJustNow, "Just Now"},
-		{bandPastHour, "Past Hour"},
-		{bandToday, "Earlier Today"},
-		{bandYesterday, "Yesterday"},
-		{bandOlder, "Older"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.expected, func(t *testing.T) {
-			got := bandLabel(tt.band)
-			if got != tt.expected {
-				t.Errorf("bandLabel(%v) = %q, want %q", tt.band, got, tt.expected)
-			}
-		})
-	}
-}
-
-func TestInterleaveWithinBands(t *testing.T) {
-	now := time.Now()
-
-	// Create items from 3 sources, all in "past hour" band
+	// Create items from 3 sources
 	items := []feeds.Item{
 		{ID: "A1", SourceName: "Source A", Published: now.Add(-15 * time.Minute)},
 		{ID: "A2", SourceName: "Source A", Published: now.Add(-16 * time.Minute)},
@@ -72,7 +22,7 @@ func TestInterleaveWithinBands(t *testing.T) {
 		{ID: "C1", SourceName: "Source C", Published: now.Add(-20 * time.Minute)},
 	}
 
-	result := interleaveWithinBands(items)
+	result := interleaveBySource(items, 100) // high limit to get all
 
 	// Should have same count
 	if len(result) != len(items) {
@@ -97,37 +47,39 @@ func TestInterleaveWithinBands(t *testing.T) {
 	}
 }
 
-func TestInterleavePreservesBandOrder(t *testing.T) {
+func TestInterleaveBySourceWithLimit(t *testing.T) {
 	now := time.Now()
 
-	// Items from different time bands
+	// Create items with one source dominating
 	items := []feeds.Item{
-		{ID: "now1", SourceName: "A", Published: now.Add(-5 * time.Minute)},  // Just Now
-		{ID: "now2", SourceName: "B", Published: now.Add(-6 * time.Minute)},  // Just Now
-		{ID: "hour1", SourceName: "A", Published: now.Add(-30 * time.Minute)}, // Past Hour
-		{ID: "hour2", SourceName: "B", Published: now.Add(-31 * time.Minute)}, // Past Hour
-		{ID: "old1", SourceName: "A", Published: now.Add(-3 * time.Hour)},     // Today
+		{ID: "A1", SourceName: "Source A", Published: now.Add(-1 * time.Minute)},
+		{ID: "A2", SourceName: "Source A", Published: now.Add(-2 * time.Minute)},
+		{ID: "A3", SourceName: "Source A", Published: now.Add(-3 * time.Minute)},
+		{ID: "A4", SourceName: "Source A", Published: now.Add(-4 * time.Minute)},
+		{ID: "A5", SourceName: "Source A", Published: now.Add(-5 * time.Minute)},
+		{ID: "B1", SourceName: "Source B", Published: now.Add(-6 * time.Minute)},
+		{ID: "B2", SourceName: "Source B", Published: now.Add(-7 * time.Minute)},
 	}
 
-	result := interleaveWithinBands(items)
+	// Limit to 2 per source
+	result := interleaveBySource(items, 2)
 
-	// Bands should still be in order: Just Now, Past Hour, Today
-	var bands []timeBand
+	// Should have 4 items (2 from A + 2 from B)
+	if len(result) != 4 {
+		t.Fatalf("Expected 4 items with maxPerSource=2, got %d", len(result))
+	}
+
+	// Count by source
+	sourceCounts := make(map[string]int)
 	for _, item := range result {
-		band := getTimeBand(item.Published)
-		if len(bands) == 0 || bands[len(bands)-1] != band {
-			bands = append(bands, band)
-		}
+		sourceCounts[item.SourceName]++
 	}
 
-	expectedBands := []timeBand{bandJustNow, bandPastHour, bandToday}
-	if len(bands) != len(expectedBands) {
-		t.Fatalf("Expected %d bands, got %d", len(expectedBands), len(bands))
+	if sourceCounts["Source A"] != 2 {
+		t.Errorf("Source A should have 2 items, got %d", sourceCounts["Source A"])
 	}
-	for i, band := range bands {
-		if band != expectedBands[i] {
-			t.Errorf("Band %d: expected %v, got %v", i, expectedBands[i], band)
-		}
+	if sourceCounts["Source B"] != 2 {
+		t.Errorf("Source B should have 2 items, got %d", sourceCounts["Source B"])
 	}
 }
 
@@ -476,46 +428,6 @@ func TestSelectedItem(t *testing.T) {
 
 // Phase 3 & 4 Tests
 
-func TestRenderSparkline(t *testing.T) {
-	tests := []struct {
-		name     string
-		values   []float64
-		width    int
-		expected int // expected rune count
-	}{
-		{"empty", []float64{}, 10, 0},
-		{"single value", []float64{0.5}, 5, 5},
-		{"multiple values", []float64{0.0, 0.25, 0.5, 0.75, 1.0}, 5, 5},
-		{"zero width", []float64{0.5}, 0, 0},
-		{"clamped high", []float64{1.5, 2.0}, 2, 2},
-		{"clamped low", []float64{-0.5, -1.0}, 2, 2},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := renderSparkline(tt.values, tt.width)
-			runeCount := len([]rune(got))
-			if runeCount != tt.expected {
-				t.Errorf("renderSparkline rune count = %d, want %d", runeCount, tt.expected)
-			}
-		})
-	}
-}
-
-func TestRenderSparklineValues(t *testing.T) {
-	// Test that different values produce different characters
-	low := renderSparkline([]float64{0.0}, 1)
-	mid := renderSparkline([]float64{0.5}, 1)
-	high := renderSparkline([]float64{1.0}, 1)
-
-	if low == high {
-		t.Error("low and high sparkline should be different")
-	}
-	if low == mid || mid == high {
-		t.Log("Note: mid sparkline may or may not differ based on quantization")
-	}
-}
-
 func TestRenderActivityIndicator(t *testing.T) {
 	tests := []struct {
 		count    int
@@ -604,23 +516,6 @@ func TestSourceActivityTracking(t *testing.T) {
 	}
 }
 
-func TestAutoCompactOnSmallTerminal(t *testing.T) {
-	m := New()
-
-	// Set small terminal size
-	m.SetSize(80, 20) // < 30 lines
-
-	// Add items - this triggers auto-density adjustment
-	items := []feeds.Item{
-		{ID: "1", Title: "Item 1", Published: time.Now()},
-	}
-	m.SetItems(items)
-
-	// Should auto-switch to compact
-	if m.Density() != DensityCompact {
-		t.Errorf("Small terminal should auto-set DensityCompact, got %v", m.Density())
-	}
-}
 
 func TestViewRendersDensityIndicator(t *testing.T) {
 	m := New()
