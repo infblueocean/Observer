@@ -398,6 +398,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		)
 	}
 
+	// Handle ItemsLoadedMsg globally - feeds must always be processed
+	// regardless of which modal view is active
+	if msg, ok := msg.(ItemsLoadedMsg); ok {
+		return m.handleItemsLoaded(msg)
+	}
+
 	// Handle modal views
 	switch m.mode {
 	case modeFilters:
@@ -462,64 +468,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.filterView.SetSize(msg.Width, msg.Height)
 		m.brainTrustPanel.SetSize(msg.Width, aiPanelHeight)
 		m.cmdPalette.SetWidth(min(60, msg.Width-4))
-		return m, nil
-
-	case ItemsLoadedMsg:
-		if msg.Err != nil {
-			logging.Error("Feed fetch failed", "source", msg.SourceName, "error", msg.Err)
-			// Add to recent errors (keep last 2)
-			m.recentErrors = append(m.recentErrors, RecentError{Err: msg.Err, Time: time.Now()})
-			if len(m.recentErrors) > 2 {
-				m.recentErrors = m.recentErrors[len(m.recentErrors)-2:]
-			}
-			m.lastErrorTime = time.Now() // Reset 10s timer
-		} else {
-			logging.Debug("Feed fetched", "source", msg.SourceName, "items", len(msg.Items), "category", msg.Category)
-			// Track categories for coloring (fast, in-memory)
-			for _, item := range msg.Items {
-				m.itemCategories[item.ID] = msg.Category
-			}
-
-			// Update aggregator state first (fast)
-			m.aggregator.UpdateSourceState(msg.SourceName, len(msg.Items), msg.Err)
-
-			// Merge into aggregator (fast, in-memory)
-			m.aggregator.MergeItems(msg.Items)
-
-			// Add to QueueManager (fast, in-memory)
-			m.queueManager.AddItems(msg.SourceName, msg.Items)
-			m.queueManager.MarkPolled(msg.SourceName)
-
-			// Refresh stream view immediately so UI is responsive
-			m.updateStreamItems()
-
-			// Track feeds loaded
-			m.feedsLoadedCount++
-
-			// Do heavy I/O work asynchronously
-			items := msg.Items
-			store := m.store
-			engine := m.correlationEngine
-			cmd := func() tea.Msg {
-				// Save to store (DB I/O - can be slow)
-				if store != nil {
-					store.SaveItems(items)
-				}
-				// Process through correlation engine
-				if engine != nil && len(items) <= 50 {
-					engine.ProcessItems(items)
-				}
-				return ItemsPersistedMsg{Count: len(items)}
-			}
-
-			// Check if we should trigger top stories
-			if !m.topStoriesAnalyzed && m.feedsLoadedCount >= 5 && m.aggregator.ItemCount() >= 20 {
-				m.topStoriesAnalyzed = true
-				m.stream.SetTopStoriesLoading(true)
-				return m, tea.Batch(cmd, m.analyzeTopStories(), m.stream.Spinner().Tick)
-			}
-			return m, cmd
-		}
 		return m, nil
 
 	case CorrelationEventMsg:
@@ -1170,6 +1118,66 @@ func (m *Model) saveAndClose() {
 	}
 
 	m.store.Close()
+}
+
+// handleItemsLoaded processes items from a feed fetch - must run regardless of modal view
+func (m Model) handleItemsLoaded(msg ItemsLoadedMsg) (tea.Model, tea.Cmd) {
+	if msg.Err != nil {
+		logging.Error("Feed fetch failed", "source", msg.SourceName, "error", msg.Err)
+		// Add to recent errors (keep last 2)
+		m.recentErrors = append(m.recentErrors, RecentError{Err: msg.Err, Time: time.Now()})
+		if len(m.recentErrors) > 2 {
+			m.recentErrors = m.recentErrors[len(m.recentErrors)-2:]
+		}
+		m.lastErrorTime = time.Now() // Reset 10s timer
+		return m, nil
+	}
+
+	logging.Debug("Feed fetched", "source", msg.SourceName, "items", len(msg.Items), "category", msg.Category)
+	// Track categories for coloring (fast, in-memory)
+	for _, item := range msg.Items {
+		m.itemCategories[item.ID] = msg.Category
+	}
+
+	// Update aggregator state first (fast)
+	m.aggregator.UpdateSourceState(msg.SourceName, len(msg.Items), msg.Err)
+
+	// Merge into aggregator (fast, in-memory)
+	m.aggregator.MergeItems(msg.Items)
+
+	// Add to QueueManager (fast, in-memory)
+	m.queueManager.AddItems(msg.SourceName, msg.Items)
+	m.queueManager.MarkPolled(msg.SourceName)
+
+	// Refresh stream view immediately so UI is responsive
+	m.updateStreamItems()
+
+	// Track feeds loaded
+	m.feedsLoadedCount++
+
+	// Do heavy I/O work asynchronously
+	items := msg.Items
+	store := m.store
+	engine := m.correlationEngine
+	cmd := func() tea.Msg {
+		// Save to store (DB I/O - can be slow)
+		if store != nil {
+			store.SaveItems(items)
+		}
+		// Process through correlation engine
+		if engine != nil && len(items) <= 50 {
+			engine.ProcessItems(items)
+		}
+		return ItemsPersistedMsg{Count: len(items)}
+	}
+
+	// Check if we should trigger top stories
+	if !m.topStoriesAnalyzed && m.feedsLoadedCount >= 5 && m.aggregator.ItemCount() >= 20 {
+		m.topStoriesAnalyzed = true
+		m.stream.SetTopStoriesLoading(true)
+		return m, tea.Batch(cmd, m.analyzeTopStories(), m.stream.Spinner().Tick)
+	}
+	return m, cmd
 }
 
 func (m Model) updateFilterView(msg tea.Msg) (tea.Model, tea.Cmd) {
