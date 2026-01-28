@@ -404,6 +404,25 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleItemsLoaded(msg)
 	}
 
+	// Handle TopStoriesMsg globally - analysis results must be processed
+	// even if user is in a modal view when they arrive
+	if msg, ok := msg.(TopStoriesMsg); ok {
+		return m.handleTopStories(msg)
+	}
+
+	// Handle spinner ticks globally for animations
+	if msg, ok := msg.(spinner.TickMsg); ok {
+		var cmd tea.Cmd
+		newSpinner, cmd := m.stream.Spinner().Update(msg)
+		m.stream.UpdateSpinner(newSpinner)
+		if m.showBrainTrust {
+			btSpinner, btCmd := m.brainTrustPanel.Spinner().Update(msg)
+			m.brainTrustPanel.UpdateSpinner(btSpinner)
+			return m, tea.Batch(cmd, btCmd)
+		}
+		return m, cmd
+	}
+
 	// Handle modal views
 	switch m.mode {
 	case modeFilters:
@@ -601,18 +620,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
-	case spinner.TickMsg:
-		// Update spinner animation for AI Analysis panel and top stories
-		var cmd tea.Cmd
-		newSpinner, cmd := m.stream.Spinner().Update(msg)
-		m.stream.UpdateSpinner(newSpinner)
-		if m.showBrainTrust {
-			btSpinner, btCmd := m.brainTrustPanel.Spinner().Update(msg)
-			m.brainTrustPanel.UpdateSpinner(btSpinner)
-			return m, tea.Batch(cmd, btCmd)
-		}
-		return m, cmd
-
 	case ShowBriefingMsg:
 		// Show briefing on startup
 		if m.showBriefingOnStart && m.width > 0 {
@@ -623,58 +630,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
-	case TopStoriesMsg:
-		// Update stream with AI-identified top stories
-		logging.Info("TopStoriesMsg received", "stories_count", len(msg.Stories), "has_error", msg.Err != nil)
-		if msg.Err != nil {
-			logging.Error("Top stories analysis failed", "error", msg.Err)
-			// Reset timer but keep any existing stories visible
-			m.stream.ResetTopStoriesRefresh()
-		} else {
-			// Get the "breathing" list - merges current results with persistent cache entries
-			breathingStories := m.brainTrust.GetBreathingTopStories(msg.Stories, 8)
-
-			if len(breathingStories) == 0 {
-				logging.Info("No top stories to display (slow news day)")
-				// Clear stories and reset timer
-				m.stream.SetTopStories(nil)
-			} else {
-				// Convert results to TopStory structs
-				var topStories []stream.TopStory
-				items := m.aggregator.GetItems()
-				itemMap := make(map[string]*feeds.Item)
-				for i := range items {
-					itemMap[items[i].ID] = &items[i]
-				}
-
-				for _, result := range breathingStories {
-					logging.Debug("Processing breathing top story",
-						"item_id", result.ItemID,
-						"label", result.Label,
-						"status", result.Status,
-						"hit_count", result.HitCount,
-						"miss_count", result.MissCount,
-						"streak", result.Streak)
-
-					if item, ok := itemMap[result.ItemID]; ok {
-						topStories = append(topStories, stream.TopStory{
-							Item:      item,
-							Label:     result.Label,
-							Reason:    result.Reason,
-							Zinger:    result.Zinger,
-							HitCount:  result.HitCount,
-							FirstSeen: result.FirstSeen,
-							Streak:    result.Streak,
-							Status:    string(result.Status),
-							MissCount: result.MissCount,
-						})
-					}
-				}
-				m.stream.SetTopStories(topStories)
-				logging.Info("Breathing top stories updated", "count", len(topStories))
-			}
-		}
-		return m, nil
 	}
 
 	return m, nil
@@ -1118,6 +1073,62 @@ func (m *Model) saveAndClose() {
 	}
 
 	m.store.Close()
+}
+
+// handleTopStories processes top stories results - must run regardless of modal view
+func (m Model) handleTopStories(msg TopStoriesMsg) (tea.Model, tea.Cmd) {
+	logging.Info("TopStoriesMsg received", "stories_count", len(msg.Stories), "has_error", msg.Err != nil)
+	if msg.Err != nil {
+		logging.Error("Top stories analysis failed", "error", msg.Err)
+		// Reset timer but keep any existing stories visible
+		m.stream.ResetTopStoriesRefresh()
+		return m, nil
+	}
+
+	// Get the "breathing" list - merges current results with persistent cache entries
+	breathingStories := m.brainTrust.GetBreathingTopStories(msg.Stories, 8)
+
+	if len(breathingStories) == 0 {
+		logging.Info("No top stories to display (slow news day)")
+		// Clear stories and reset timer
+		m.stream.SetTopStories(nil)
+		return m, nil
+	}
+
+	// Convert results to TopStory structs
+	var topStories []stream.TopStory
+	items := m.aggregator.GetItems()
+	itemMap := make(map[string]*feeds.Item)
+	for i := range items {
+		itemMap[items[i].ID] = &items[i]
+	}
+
+	for _, result := range breathingStories {
+		logging.Debug("Processing breathing top story",
+			"item_id", result.ItemID,
+			"label", result.Label,
+			"status", result.Status,
+			"hit_count", result.HitCount,
+			"miss_count", result.MissCount,
+			"streak", result.Streak)
+
+		if item, ok := itemMap[result.ItemID]; ok {
+			topStories = append(topStories, stream.TopStory{
+				Item:      item,
+				Label:     result.Label,
+				Reason:    result.Reason,
+				Zinger:    result.Zinger,
+				HitCount:  result.HitCount,
+				FirstSeen: result.FirstSeen,
+				Streak:    result.Streak,
+				Status:    string(result.Status),
+				MissCount: result.MissCount,
+			})
+		}
+	}
+	m.stream.SetTopStories(topStories)
+	logging.Info("Breathing top stories updated", "count", len(topStories))
+	return m, nil
 }
 
 // handleItemsLoaded processes items from a feed fetch - must run regardless of modal view
