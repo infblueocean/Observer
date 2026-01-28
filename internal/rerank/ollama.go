@@ -9,17 +9,20 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/abelbrown/observer/internal/logging"
 )
 
 // OllamaReranker uses Ollama to score document relevance.
-// Works with any instruction-following model but optimized for reranker models.
+// Uses parallel single-pair requests - Ollama batches internally on GPU.
 type OllamaReranker struct {
-	endpoint string
-	model    string
-	client   *http.Client
+	endpoint    string
+	model       string
+	client      *http.Client
+	concurrency int // Max parallel requests
 }
 
 // NewOllamaReranker creates a reranker using Ollama.
@@ -30,9 +33,10 @@ func NewOllamaReranker(endpoint, model string) *OllamaReranker {
 	}
 
 	r := &OllamaReranker{
-		endpoint: endpoint,
-		model:    model,
-		client:   &http.Client{Timeout: 120 * time.Second},
+		endpoint:    endpoint,
+		model:       model,
+		client:      &http.Client{Timeout: 30 * time.Second}, // Per-request timeout
+		concurrency: 32,                                      // Parallel requests - Ollama batches on GPU
 	}
 
 	// Auto-detect model if not specified
@@ -122,166 +126,156 @@ func (r *OllamaReranker) RerankWithProgress(ctx context.Context, query string, d
 		return nil, fmt.Errorf("ollama reranker not available (model: %s)", r.model)
 	}
 
-	logging.Info("Reranking documents", "count", len(docs), "model", r.model)
+	logging.Info("Reranking documents (parallel)", "count", len(docs), "concurrency", r.concurrency, "model", r.model)
 
-	// Batch documents to reduce API calls
-	// Score in batches of 10 for efficiency
-	batchSize := 10
 	scores := make([]float64, len(docs))
-
-	for i := 0; i < len(docs); i += batchSize {
-		end := i + batchSize
-		if end > len(docs) {
-			end = len(docs)
-		}
-		batch := docs[i:end]
-
-		if progress != nil {
-			pct := float64(i) / float64(len(docs))
-			progress(pct, fmt.Sprintf("%d of %d", i, len(docs)))
-		}
-
-		batchScores, err := r.scoreBatch(ctx, query, batch)
-		if err != nil {
-			logging.Error("Batch scoring failed", "batch_start", i, "error", err)
-			// Fill with neutral scores on error
-			for j := i; j < end; j++ {
-				scores[j] = 0.5
-			}
-			continue
-		}
-
-		copy(scores[i:end], batchScores)
+	for i := range scores {
+		scores[i] = 0.5 // Default neutral score
 	}
+
+	// Semaphore for concurrency control
+	sem := make(chan struct{}, r.concurrency)
+	var wg sync.WaitGroup
+	var completed int64
+
+	// Error collection (non-fatal - we continue with neutral scores)
+	var errCount int64
+
+	for i, doc := range docs {
+		wg.Add(1)
+		go func(idx int, document string) {
+			defer wg.Done()
+
+			// Acquire semaphore
+			select {
+			case sem <- struct{}{}:
+				defer func() { <-sem }()
+			case <-ctx.Done():
+				return
+			}
+
+			score, err := r.scoreOne(ctx, query, document)
+			if err != nil {
+				atomic.AddInt64(&errCount, 1)
+				// Keep default 0.5 score
+			} else {
+				scores[idx] = score
+			}
+
+			done := atomic.AddInt64(&completed, 1)
+			if progress != nil && done%10 == 0 {
+				progress(float64(done)/float64(len(docs)), fmt.Sprintf("%d of %d", done, len(docs)))
+			}
+		}(i, doc)
+	}
+
+	wg.Wait()
 
 	if progress != nil {
 		progress(1.0, fmt.Sprintf("%d of %d", len(docs), len(docs)))
 	}
 
-	logging.Info("Reranking complete", "count", len(docs))
+	logging.Info("Reranking complete", "count", len(docs), "errors", errCount)
 	return scores, nil
 }
 
-// scoreBatch scores a batch of documents against the query.
-func (r *OllamaReranker) scoreBatch(ctx context.Context, query string, docs []string) ([]float64, error) {
-	// Build prompt asking for relevance scores
-	var sb strings.Builder
-	sb.WriteString("Rate the relevance of each headline to this topic on a scale of 0-10.\n\n")
-	sb.WriteString("Topic: ")
-	sb.WriteString(query)
-	sb.WriteString("\n\nHeadlines:\n")
-
-	for i, doc := range docs {
-		// Truncate very long headlines
-		headline := doc
-		if len(headline) > 200 {
-			headline = headline[:200] + "..."
-		}
-		sb.WriteString(fmt.Sprintf("%d. %s\n", i+1, headline))
+// scoreOne scores a single document against the query.
+// This is called in parallel - Ollama batches internally on GPU.
+func (r *OllamaReranker) scoreOne(ctx context.Context, query, doc string) (float64, error) {
+	// Truncate very long documents
+	if len(doc) > 300 {
+		doc = doc[:300] + "..."
 	}
 
-	sb.WriteString("\nRespond with ONLY the scores, one per line, format: 'N. score'")
-	sb.WriteString("\nExample: '1. 8' means headline 1 has relevance score 8")
+	// Simple prompt for relevance scoring
+	prompt := fmt.Sprintf(`Rate the relevance of this headline to the topic.
+Topic: %s
 
-	prompt := sb.String()
+Headline: %s
 
-	// Call Ollama
+Reply with ONLY a number from 0-10 (10 = highly relevant, 0 = not relevant).
+Score:`, query, doc)
+
 	body := map[string]any{
 		"model":  r.model,
 		"prompt": prompt,
 		"stream": false,
 		"options": map[string]any{
-			"temperature": 0.1, // Low temperature for consistent scoring
-			"num_predict": 100, // Short response expected
+			"temperature": 0.0, // Deterministic scoring
+			"num_predict": 10,  // Just need a single number
 		},
 	}
 
 	jsonBody, _ := json.Marshal(body)
 	req, err := http.NewRequestWithContext(ctx, "POST", r.endpoint+"/api/generate", bytes.NewReader(jsonBody))
 	if err != nil {
-		return nil, err
+		return 0, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := r.client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("ollama request failed: %w", err)
+		return 0, fmt.Errorf("ollama request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("read response failed: %w", err)
+		return 0, fmt.Errorf("read response failed: %w", err)
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("ollama error (status %d): %s", resp.StatusCode, string(respBody))
+		return 0, fmt.Errorf("ollama error (status %d): %s", resp.StatusCode, string(respBody))
 	}
 
 	var result struct {
 		Response string `json:"response"`
 	}
 	if err := json.Unmarshal(respBody, &result); err != nil {
-		return nil, fmt.Errorf("parse response failed: %w", err)
+		return 0, fmt.Errorf("parse response failed: %w", err)
 	}
 
-	// Parse scores from response
-	return parseScores(result.Response, len(docs)), nil
+	// Parse score from response
+	return parseScore(result.Response), nil
 }
 
-// parseScores extracts numeric scores from LLM response.
-// Handles formats like "1. 8", "1: 8", "1 - 8", etc.
-func parseScores(response string, expected int) []float64 {
-	scores := make([]float64, expected)
-	for i := range scores {
-		scores[i] = 0.5 // Default neutral score
+// parseScore extracts a numeric score from LLM response.
+func parseScore(response string) float64 {
+	response = strings.TrimSpace(response)
+
+	// Try to parse as plain number
+	if score, err := strconv.ParseFloat(response, 64); err == nil {
+		return normalizeScore(score)
 	}
 
-	lines := strings.Split(response, "\n")
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
+	// Try to extract first number from response
+	var score float64
+	for _, word := range strings.Fields(response) {
+		// Remove common suffixes
+		word = strings.TrimSuffix(word, "/10")
+		word = strings.TrimSuffix(word, ".")
+		word = strings.TrimSuffix(word, ",")
 
-		// Try to parse "N. score" or "N: score" or "N score" format
-		var idx int
-		var score float64
-
-		// Try different separators
-		for _, sep := range []string{".", ":", "-", " "} {
-			parts := strings.SplitN(line, sep, 2)
-			if len(parts) == 2 {
-				if n, err := strconv.Atoi(strings.TrimSpace(parts[0])); err == nil {
-					idx = n
-					// Extract number from second part
-					scoreStr := strings.TrimSpace(parts[1])
-					// Handle "8/10" format
-					if slashIdx := strings.Index(scoreStr, "/"); slashIdx > 0 {
-						scoreStr = scoreStr[:slashIdx]
-					}
-					if s, err := strconv.ParseFloat(strings.TrimSpace(scoreStr), 64); err == nil {
-						score = s
-						break
-					}
-				}
-			}
-		}
-
-		if idx >= 1 && idx <= expected {
-			// Normalize to 0-1 range
-			if score > 1 {
-				score = score / 10.0
-			}
-			if score > 1 {
-				score = 1
-			}
-			if score < 0 {
-				score = 0
-			}
-			scores[idx-1] = score
+		if s, err := strconv.ParseFloat(word, 64); err == nil {
+			score = s
+			break
 		}
 	}
 
-	return scores
+	return normalizeScore(score)
+}
+
+// normalizeScore converts score to 0-1 range
+func normalizeScore(score float64) float64 {
+	// Assume 0-10 scale if > 1
+	if score > 1 {
+		score = score / 10.0
+	}
+	if score > 1 {
+		score = 1
+	}
+	if score < 0 {
+		score = 0
+	}
+	return score
 }

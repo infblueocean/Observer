@@ -33,6 +33,11 @@ var (
 	completeStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("#58a6ff"))
 
+	// Fresh completion - bright green, stands out
+	freshCompleteStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("#3fb950")).
+				Bold(true)
+
 	failedStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("#f85149"))
 
@@ -196,15 +201,20 @@ func (m Model) View() string {
 func (m Model) renderItem(item *work.Item) string {
 	var parts []string
 
-	// Status icon
+	// Status icon - highlight fresh completions (< 3 seconds old)
 	icon := item.StatusIcon()
+	isFresh := item.Status == work.StatusComplete && item.Age() < 3*time.Second
 	switch item.Status {
 	case work.StatusActive:
 		parts = append(parts, activeStyle.Render("["+icon+"]"))
 	case work.StatusPending:
 		parts = append(parts, pendingStyle.Render("["+icon+"]"))
 	case work.StatusComplete:
-		parts = append(parts, completeStyle.Render("["+icon+"]"))
+		if isFresh {
+			parts = append(parts, freshCompleteStyle.Render("["+icon+"]"))
+		} else {
+			parts = append(parts, completeStyle.Render("["+icon+"]"))
+		}
 	case work.StatusFailed:
 		parts = append(parts, failedStyle.Render("["+icon+"]"))
 	}
@@ -229,11 +239,19 @@ func (m Model) renderItem(item *work.Item) string {
 		// Nothing extra for pending
 
 	case work.StatusComplete:
-		// Result and age
+		// Result and age - highlight fresh completions
 		if item.Result != "" {
-			parts = append(parts, completeStyle.Render(truncate(item.Result, 15)))
+			if isFresh {
+				parts = append(parts, freshCompleteStyle.Render(truncate(item.Result, 15)))
+			} else {
+				parts = append(parts, completeStyle.Render(truncate(item.Result, 15)))
+			}
 		}
-		parts = append(parts, dimStyle.Render(formatAge(item.Age())))
+		if isFresh {
+			parts = append(parts, freshCompleteStyle.Render("just now"))
+		} else {
+			parts = append(parts, dimStyle.Render(formatAge(item.Age())))
+		}
 
 	case work.StatusFailed:
 		// Error and age

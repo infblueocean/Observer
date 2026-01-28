@@ -540,6 +540,39 @@ func TestViewRendersDensityIndicator(t *testing.T) {
 	}
 }
 
+func TestRerankingCount(t *testing.T) {
+	m := New()
+
+	// Initial state
+	if m.GetRerankingCount() != 0 {
+		t.Errorf("Initial reranking count = %d, want 0", m.GetRerankingCount())
+	}
+
+	// Set count
+	m.SetRerankingCount(150)
+	if m.GetRerankingCount() != 150 {
+		t.Errorf("After SetRerankingCount(150) = %d, want 150", m.GetRerankingCount())
+	}
+
+	// Elapsed time should be non-zero after setting count
+	// (we can't test exact value, but it should be >= 0)
+	elapsed := m.GetRerankingElapsed()
+	if elapsed < 0 {
+		t.Errorf("GetRerankingElapsed() = %d, should be >= 0", elapsed)
+	}
+
+	// Clear count
+	m.SetRerankingCount(0)
+	if m.GetRerankingCount() != 0 {
+		t.Errorf("After SetRerankingCount(0) = %d, want 0", m.GetRerankingCount())
+	}
+
+	// Elapsed should be 0 after clearing
+	if m.GetRerankingElapsed() != 0 {
+		t.Errorf("After clear, GetRerankingElapsed() = %d, want 0", m.GetRerankingElapsed())
+	}
+}
+
 func TestExtractProbability(t *testing.T) {
 	tests := []struct {
 		text     string

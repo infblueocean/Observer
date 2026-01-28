@@ -499,7 +499,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.showBrainTrust {
 			btSpinner, btCmd := m.brainTrustPanel.Spinner().Update(msg)
 			m.brainTrustPanel.UpdateSpinner(btSpinner)
-			return m, tea.Batch(cmd, btCmd)
+			cmd = tea.Batch(cmd, btCmd)
+		}
+		// Also update work view spinner and refresh when in work mode
+		if m.mode == modeWork {
+			wvSpinner, wvCmd := m.workView.Spinner().Update(msg)
+			m.workView.SetSpinner(wvSpinner)
+			m.workView.Refresh()
+			cmd = tea.Batch(cmd, wvCmd)
 		}
 		return m, cmd
 	}
@@ -1302,6 +1309,13 @@ func (m Model) handleRerankTopStories(msg RerankTopStoriesMsg) (tea.Model, tea.C
 func (m Model) handleWorkEvent(msg WorkEventMsg) (tea.Model, tea.Cmd) {
 	event := msg.Event
 
+	// Handle rerank started event to update status bar with count
+	if event.Change == "started" && event.Item.Type == work.TypeRerank {
+		var count int
+		fmt.Sscanf(event.Item.Description, "Reranking %d headlines", &count)
+		m.stream.SetRerankingCount(count)
+	}
+
 	// Handle specific work types that need to trigger UI updates
 	if event.Change == "completed" || event.Change == "failed" {
 		switch event.Item.Type {
@@ -1330,7 +1344,10 @@ func (m Model) handleWorkEvent(msg WorkEventMsg) (tea.Model, tea.Cmd) {
 			return m, tea.Batch(cmd, m.subscribeWorkEvents())
 
 		case work.TypeRerank:
-			// Reranking completed - convert to RerankTopStoriesMsg
+			// Reranking completed - clear the status bar count
+			m.stream.SetRerankingCount(0)
+
+			// Convert to RerankTopStoriesMsg
 			var stories []RerankStory
 			if event.Item.Data != nil {
 				if result, ok := event.Item.Data.(RerankResult); ok {
@@ -1768,7 +1785,13 @@ func (m Model) View() string {
 	}
 	// Show background work indicator (top stories refresh, embedding, etc.)
 	if m.stream.IsTopStoriesLoading() {
-		headerText += "  │  ⟳ ranking"
+		count := m.stream.GetRerankingCount()
+		elapsed := m.stream.GetRerankingElapsed()
+		if count > 0 {
+			headerText += fmt.Sprintf("  │  %s ranking %d [%ds]", m.stream.Spinner().View(), count, elapsed)
+		} else {
+			headerText += fmt.Sprintf("  │  %s ranking", m.stream.Spinner().View())
+		}
 	}
 	header := headerStyle.Render(headerText)
 

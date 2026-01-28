@@ -265,6 +265,8 @@ type Model struct {
 	topStories   []TopStory                // AI-identified top stories
 	topStoriesLoading bool                 // Whether top stories are being analyzed
 	topStoriesLastRefresh time.Time        // When top stories were last refreshed
+	rerankingCount int                     // Number of items being reranked (for status display)
+	rerankingStartTime time.Time           // When reranking started (for elapsed time display)
 
 	// Correlation engine for duplicate/cluster indicators
 	correlationEngine *correlation.Engine
@@ -609,6 +611,29 @@ func (m Model) IsTopStoriesLoading() bool {
 	return m.topStoriesLoading
 }
 
+// SetRerankingCount sets the number of items being reranked for status display
+func (m *Model) SetRerankingCount(count int) {
+	m.rerankingCount = count
+	if count > 0 {
+		m.rerankingStartTime = time.Now()
+	} else {
+		m.rerankingStartTime = time.Time{} // Clear start time when done
+	}
+}
+
+// GetRerankingCount returns the number of items being reranked
+func (m Model) GetRerankingCount() int {
+	return m.rerankingCount
+}
+
+// GetRerankingElapsed returns seconds elapsed since reranking started
+func (m Model) GetRerankingElapsed() int {
+	if m.rerankingStartTime.IsZero() {
+		return 0
+	}
+	return int(time.Since(m.rerankingStartTime).Seconds())
+}
+
 // ResetTopStoriesRefresh resets the refresh timer without clearing stories
 // Use this when analysis fails but we want to keep showing old stories
 func (m *Model) ResetTopStoriesRefresh() {
@@ -877,8 +902,8 @@ func (m Model) renderTopStoriesSection() []string {
 	// Build header with refresh progress bar or loading indicator
 	headerText := "━━━ TOP STORIES ━━━"
 	if m.topStoriesLoading {
-		// Show spinner in header while refreshing (keeps existing stories visible)
-		headerText = fmt.Sprintf("━━━ TOP STORIES %s ⟳ ━━━", m.spinner.View())
+		// Show just spinner while refreshing (status bar shows count)
+		headerText = fmt.Sprintf("━━━ TOP STORIES %s ━━━", m.spinner.View())
 	} else if len(m.topStories) > 0 {
 		// Normal state: show countdown timer
 		timerWidget := m.renderRefreshTimer()

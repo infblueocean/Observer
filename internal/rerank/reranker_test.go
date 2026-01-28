@@ -38,55 +38,55 @@ func TestTopN(t *testing.T) {
 	}
 }
 
-func TestParseScores(t *testing.T) {
+func TestParseScore(t *testing.T) {
 	tests := []struct {
 		name     string
 		response string
-		expected int
-		want     []float64
+		want     float64
 	}{
-		{
-			name:     "standard format",
-			response: "1. 8\n2. 5\n3. 9",
-			expected: 3,
-			want:     []float64{0.8, 0.5, 0.9},
-		},
-		{
-			name:     "colon format",
-			response: "1: 7\n2: 3\n3: 10",
-			expected: 3,
-			want:     []float64{0.7, 0.3, 1.0},
-		},
-		{
-			name:     "with extra text",
-			response: "Here are the scores:\n1. 6\n2. 8\nDone.",
-			expected: 2,
-			want:     []float64{0.6, 0.8},
-		},
-		{
-			name:     "fraction format",
-			response: "1. 8/10\n2. 5/10",
-			expected: 2,
-			want:     []float64{0.8, 0.5},
-		},
-		{
-			name:     "missing scores default to 0.5",
-			response: "1. 9",
-			expected: 3,
-			want:     []float64{0.9, 0.5, 0.5},
-		},
+		{"plain number", "8", 0.8},
+		{"with newline", "7\n", 0.7},
+		{"with spaces", "  9  ", 0.9},
+		{"decimal", "8.5", 0.85},
+		{"fraction format", "8/10", 0.8},
+		{"with text", "Score: 6", 0.6},
+		{"zero", "0", 0.0},
+		{"ten", "10", 1.0},
+		{"already normalized", "0.7", 0.7},
+		{"empty response", "", 0.0},
+		{"garbage", "not a number", 0.0},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := parseScores(tt.response, tt.expected)
-			if len(got) != len(tt.want) {
-				t.Fatalf("length mismatch: got %d, want %d", len(got), len(tt.want))
+			got := parseScore(tt.response)
+			if got != tt.want {
+				t.Errorf("parseScore(%q) = %.2f, want %.2f", tt.response, got, tt.want)
 			}
-			for i, score := range got {
-				if score != tt.want[i] {
-					t.Errorf("score[%d]: got %.1f, want %.1f", i, score, tt.want[i])
-				}
+		})
+	}
+}
+
+func TestNormalizeScore(t *testing.T) {
+	tests := []struct {
+		input float64
+		want  float64
+	}{
+		{8, 0.8},    // 0-10 scale
+		{10, 1.0},   // max
+		{0, 0.0},    // min
+		{0.5, 0.5},  // already normalized
+		{1.0, 1.0},  // boundary
+		{15, 1.0},   // clamped to 1
+		{-5, 0.0},   // clamped to 0
+		{100, 1.0},  // large number clamped
+	}
+
+	for _, tt := range tests {
+		t.Run("", func(t *testing.T) {
+			got := normalizeScore(tt.input)
+			if got != tt.want {
+				t.Errorf("normalizeScore(%.1f) = %.2f, want %.2f", tt.input, got, tt.want)
 			}
 		})
 	}
