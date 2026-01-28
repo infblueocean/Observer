@@ -192,6 +192,7 @@ func buildOllamaBody(cfg *ProviderConfig, req Request) map[string]any {
 	return map[string]any{
 		"model":  cfg.Model,
 		"prompt": prompt,
+		"stream": false, // Disable streaming for non-streaming requests
 	}
 }
 
