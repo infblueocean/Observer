@@ -126,21 +126,28 @@ func bandLabel(band timeBand) string {
 // interleaveWithinBands reorders items so sources are spread evenly within each time band
 // Instead of: [A1, A2, A3, B1, B2, C1] (chronological clusters)
 // Produces:   [A1, B1, C1, A2, B2, A3] (interleaved by source)
-// Also caps chatty sources to maxPerSourcePerBand items per time band to ensure diversity
+// Also caps items per band to fixed slots for predictable layout
 func interleaveWithinBands(items []feeds.Item) []feeds.Item {
 	if len(items) == 0 {
 		return items
 	}
 
-	// Max items per source per time band - prevents SEC, Nikkei, etc from dominating
-	// "Just Now" and "Past Hour" get more since they're breaking news
-	// Older bands get fewer since we want recent diversity
+	// Fixed slots per time band - predictable layout regardless of feed volume
+	maxItemsByBand := map[timeBand]int{
+		bandJustNow:    10, // Latest breaking news
+		bandPastHour:   20, // Recent developments
+		bandToday:      10, // Earlier today highlights
+		bandYesterday:  5,  // Yesterday's notable
+		bandOlder:      3,  // Archive samples
+	}
+
+	// Max items per source within a band - ensures diversity
 	maxPerSourceByBand := map[timeBand]int{
-		bandJustNow:    8,  // Breaking news - show more
-		bandPastHour:   5,  // Recent - good balance
-		bandToday:      3,  // Today - limit repetition
-		bandYesterday:  2,  // Yesterday - just highlights
-		bandOlder:      1,  // Older - one representative each
+		bandJustNow:    3, // Don't let one source dominate breaking
+		bandPastHour:   3, // Spread across sources
+		bandToday:      2, // Limit repetition
+		bandYesterday:  1, // One per source max
+		bandOlder:      1, // One representative each
 	}
 
 	// Group items by time band
@@ -150,7 +157,7 @@ func interleaveWithinBands(items []feeds.Item) []feeds.Item {
 		bandItems[band] = append(bandItems[band], item)
 	}
 
-	// Interleave items within each band
+	// Interleave items within each band, respecting both limits
 	result := make([]feeds.Item, 0, len(items))
 	for _, band := range []timeBand{bandJustNow, bandPastHour, bandToday, bandYesterday, bandOlder} {
 		bandList := bandItems[band]
@@ -158,6 +165,7 @@ func interleaveWithinBands(items []feeds.Item) []feeds.Item {
 			continue
 		}
 
+		maxItems := maxItemsByBand[band]
 		maxPerSource := maxPerSourceByBand[band]
 
 		// Group by source within this band
@@ -170,20 +178,25 @@ func interleaveWithinBands(items []feeds.Item) []feeds.Item {
 			sourceItems[item.SourceName] = append(sourceItems[item.SourceName], item)
 		}
 
-		// Round-robin through sources, respecting maxPerSource limit
+		// Round-robin through sources, respecting both limits
+		bandResult := make([]feeds.Item, 0, maxItems)
 		sourceIdx := make(map[string]int)
 		moreToAdd := true
-		for moreToAdd {
+		for moreToAdd && len(bandResult) < maxItems {
 			moreToAdd = false
 			for _, source := range sourceOrder {
+				if len(bandResult) >= maxItems {
+					break
+				}
 				idx := sourceIdx[source]
 				if idx < len(sourceItems[source]) && idx < maxPerSource {
-					result = append(result, sourceItems[source][idx])
+					bandResult = append(bandResult, sourceItems[source][idx])
 					sourceIdx[source]++
 					moreToAdd = true
 				}
 			}
 		}
+		result = append(result, bandResult...)
 	}
 
 	return result
