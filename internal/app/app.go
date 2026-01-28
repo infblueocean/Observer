@@ -14,6 +14,7 @@ import (
 	"github.com/abelbrown/observer/internal/config"
 	"github.com/abelbrown/observer/internal/correlation"
 	"github.com/abelbrown/observer/internal/curation"
+	"github.com/abelbrown/observer/internal/embedding"
 	"github.com/abelbrown/observer/internal/feeds"
 	"github.com/abelbrown/observer/internal/feeds/hackernews"
 	"github.com/abelbrown/observer/internal/feeds/manifold"
@@ -21,6 +22,7 @@ import (
 	"github.com/abelbrown/observer/internal/feeds/rss"
 	"github.com/abelbrown/observer/internal/feeds/usgs"
 	"github.com/abelbrown/observer/internal/logging"
+	"github.com/abelbrown/observer/internal/rerank"
 	"github.com/abelbrown/observer/internal/sampling"
 	"github.com/abelbrown/observer/internal/selection"
 	"github.com/abelbrown/observer/internal/store"
@@ -32,6 +34,8 @@ import (
 	"github.com/abelbrown/observer/internal/ui/radar"
 	"github.com/abelbrown/observer/internal/ui/sources"
 	"github.com/abelbrown/observer/internal/ui/stream"
+	"github.com/abelbrown/observer/internal/ui/workview"
+	"github.com/abelbrown/observer/internal/work"
 	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -49,6 +53,7 @@ const (
 	modeRadar
 	modeBriefing
 	modeHelp
+	modeWork // Work queue view (/w)
 )
 
 // RecentError holds an error with its timestamp
@@ -76,6 +81,11 @@ type Model struct {
 	store             *store.Store
 	config            *config.Config
 	correlationEngine *correlation.Engine
+	workPool          *work.Pool        // Unified async work pool
+	workView          workview.Model    // Work queue visualization
+	workEventChan     <-chan work.Event // Subscription to work events
+	reranker          rerank.Reranker   // ML-based headline reranker
+	embedDedup        *embedding.DedupIndex // Embedding-based deduplication
 	itemCategories    map[string]string // item ID -> category
 	width             int
 	height            int
@@ -120,6 +130,8 @@ func New() Model {
 		cfg.LoadKeysFromFile(keysPath)
 	}
 	cfg.AutoPopulateFromEnv()
+	keyCount := cfg.ExportToEnvWithLogging(logging.Debug) // Make keys available to brain providers via os.Getenv()
+	logging.Info("API keys exported to environment", "count", keyCount)
 	cfg.Save()
 
 	// Initialize store
@@ -194,7 +206,7 @@ func New() Model {
 	brainTrustInstance := brain.NewBrainTrust(nil)
 
 	// Add all available providers (reads API keys from env vars)
-	for _, p := range brain.CreateAllProviders() {
+	for _, p := range brain.CreateAllProvidersWithLogging(logging.Debug) {
 		brainTrustInstance.AddProvider(p)
 		logging.Info("Provider added", "name", p.Name())
 	}
@@ -304,6 +316,41 @@ func New() Model {
 		logging.Info("Correlation pipeline started")
 	}
 
+	// Initialize work pool (unified async processing)
+	workPool := work.NewPool(0) // 0 = use runtime.NumCPU()
+	workPool.Start(ctx)
+	workEventChan := workPool.Subscribe() // Subscribe to work events for Bubble Tea
+	logging.Info("Work pool started")
+
+	// Initialize work view
+	workViewModel := workview.New(workPool)
+
+	// Initialize reranker (for ML-based top stories)
+	rerankerInstance := rerank.NewReranker()
+	if rerankerInstance != nil {
+		logging.Info("Reranker initialized", "name", rerankerInstance.Name())
+	} else {
+		logging.Warn("No reranker available - top stories will use LLM fallback")
+	}
+
+	// Initialize embedding-based deduplication
+	var embedDedupIndex *embedding.DedupIndex
+	ollamaEndpoint := os.Getenv("OLLAMA_HOST")
+	if ollamaEndpoint == "" {
+		ollamaEndpoint = "http://localhost:11434"
+	}
+	embedModel := os.Getenv("EMBED_MODEL")
+	if embedModel == "" {
+		embedModel = "mxbai-embed-large"
+	}
+	embedder := embedding.NewOllamaEmbedder(ollamaEndpoint, embedModel)
+	if embedder.Available() {
+		embedDedupIndex = embedding.NewDedupIndex(embedder, 0.85) // 85% similarity = duplicate
+		logging.Info("Embedding dedup initialized", "model", embedder.Name())
+	} else {
+		logging.Warn("Embedding model not available - dedup disabled", "model", embedModel)
+	}
+
 	return Model{
 		stream:              streamModel,
 		filterView:          filters.New(filterEngine),
@@ -321,6 +368,11 @@ func New() Model {
 		store:               st,
 		config:              cfg,
 		correlationEngine:   correlationEngine,
+		workPool:            workPool,
+		workView:            workViewModel,
+		workEventChan:       workEventChan,
+		reranker:            rerankerInstance,
+		embedDedup:          embedDedupIndex,
 		itemCategories:      make(map[string]string),
 		mode:                modeStream,
 		sessionID:           sessionID,
@@ -343,6 +395,11 @@ func (m Model) Init() tea.Cmd {
 	// Subscribe to correlation events
 	if m.correlationEngine != nil {
 		cmds = append(cmds, m.subscribeCorrelation())
+	}
+
+	// Subscribe to work pool events
+	if m.workEventChan != nil {
+		cmds = append(cmds, m.subscribeWorkEvents())
 	}
 
 	// Show briefing on startup if needed (after a delay to let window size be set)
@@ -369,6 +426,20 @@ func (m Model) subscribeCorrelation() tea.Cmd {
 	}
 }
 
+// subscribeWorkEvents returns a command that waits for work pool events
+func (m Model) subscribeWorkEvents() tea.Cmd {
+	if m.workEventChan == nil {
+		return nil
+	}
+	return func() tea.Msg {
+		event, ok := <-m.workEventChan
+		if !ok {
+			return nil // Channel closed
+		}
+		return WorkEventMsg{Event: event}
+	}
+}
+
 // Update handles messages
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// Handle tick messages globally - these must always run to keep the app alive
@@ -379,9 +450,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.recentErrors = nil
 		}
 
-		// Auto-refresh top stories every 30 seconds (only in stream mode)
+		// Auto-refresh top stories every 30 seconds (runs in background regardless of view)
 		var topStoriesCmd tea.Cmd
-		if m.mode == modeStream && m.stream.TopStoriesNeedsRefresh() && m.aggregator.ItemCount() > 10 {
+		if m.stream.TopStoriesNeedsRefresh() && m.aggregator.ItemCount() > 10 {
 			logging.Info("Auto-refreshing top stories")
 			m.stream.SetTopStoriesLoading(true)
 			topStoriesCmd = tea.Batch(m.analyzeTopStories(), m.stream.Spinner().Tick)
@@ -408,6 +479,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// even if user is in a modal view when they arrive
 	if msg, ok := msg.(TopStoriesMsg); ok {
 		return m.handleTopStories(msg)
+	}
+
+	// Handle RerankTopStoriesMsg - reranker-based top stories
+	if msg, ok := msg.(RerankTopStoriesMsg); ok {
+		return m.handleRerankTopStories(msg)
+	}
+
+	// Handle WorkEventMsg globally - work pool events must be processed
+	if msg, ok := msg.(WorkEventMsg); ok {
+		return m.handleWorkEvent(msg)
 	}
 
 	// Handle spinner ticks globally for animations
@@ -437,6 +518,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.updateBriefingView(msg)
 	case modeHelp:
 		return m.updateHelpView(msg)
+	case modeWork:
+		return m.updateWorkView(msg)
 	}
 
 	// Command palette takes priority when active
@@ -1019,6 +1102,12 @@ func (m *Model) executeCommand(cmd string) (tea.Model, tea.Cmd) {
 		logging.Info("Top stories cache cleared via /clearcache command")
 	case "help":
 		m.mode = modeHelp
+	case "w", "work", "jobs", "queue":
+		logging.Info("Switching to work view", "current_mode", m.mode)
+		m.mode = modeWork
+		m.workView.SetSize(m.width, m.height)
+		m.workView.Refresh()
+		return m, m.workView.Spinner().Tick
 	case "quit", "exit", "q":
 		m.saveAndClose()
 		return m, tea.Quit
@@ -1028,6 +1117,11 @@ func (m *Model) executeCommand(cmd string) (tea.Model, tea.Cmd) {
 
 // saveAndClose saves state and closes the store
 func (m *Model) saveAndClose() {
+	// Stop work pool
+	if m.workPool != nil {
+		m.workPool.Stop()
+	}
+
 	// Stop correlation pipeline
 	if m.correlationCancel != nil {
 		m.correlationCancel()
@@ -1129,6 +1223,140 @@ func (m Model) handleTopStories(msg TopStoriesMsg) (tea.Model, tea.Cmd) {
 	m.stream.SetTopStories(topStories)
 	logging.Info("Breathing top stories updated", "count", len(topStories))
 	return m, nil
+}
+
+// handleRerankTopStories processes reranker-based top stories results
+func (m Model) handleRerankTopStories(msg RerankTopStoriesMsg) (tea.Model, tea.Cmd) {
+	logging.Info("RerankTopStoriesMsg received", "stories_count", len(msg.Stories), "has_error", msg.Err != nil)
+
+	m.stream.SetTopStoriesLoading(false)
+	m.stream.ResetTopStoriesRefresh()
+
+	if msg.Err != nil {
+		logging.Error("Rerank top stories failed", "error", msg.Err)
+		// Keep existing stories on error
+		return m, nil
+	}
+
+	if len(msg.Stories) == 0 {
+		logging.Info("No top stories from reranker")
+		m.stream.SetTopStories(nil)
+		m.stream.ClearRankedOrder()
+		return m, nil
+	}
+
+	// Build item lookup
+	items := m.aggregator.GetItems()
+	itemMap := make(map[string]*feeds.Item)
+	for i := range items {
+		itemMap[items[i].ID] = &items[i]
+	}
+
+	// Extract ALL ranked item IDs for feed ordering (most relevant first)
+	rankedIDs := make([]string, 0, len(msg.Stories))
+	for _, story := range msg.Stories {
+		rankedIDs = append(rankedIDs, story.ItemID)
+	}
+	m.stream.SetRankedOrder(rankedIDs)
+	logging.Info("Feed ranking updated", "ranked_items", len(rankedIDs))
+
+	// Convert top 8 rerank results to TopStory format for the header section
+	var topStories []stream.TopStory
+	maxTopStories := 8
+	for i, story := range msg.Stories {
+		if i >= maxTopStories {
+			break
+		}
+		if item, ok := itemMap[story.ItemID]; ok {
+			// Assign label based on rank and score
+			label := "◦ NOTED"
+			if i < 2 && story.Score >= 0.8 {
+				label = "★ MAJOR"
+			} else if i < 4 && story.Score >= 0.6 {
+				label = "◉ TOP"
+			} else if story.Score >= 0.5 {
+				label = "◐ RELEVANT"
+			}
+
+			topStories = append(topStories, stream.TopStory{
+				Item:      item,
+				Label:     label,
+				Reason:    fmt.Sprintf("Relevance: %.0f%%", story.Score*100),
+				HitCount:  1,
+				FirstSeen: time.Now(),
+				Status:    "ranked",
+			})
+		}
+	}
+
+	m.stream.SetTopStories(topStories)
+	logging.Info("Rerank top stories updated", "count", len(topStories))
+
+	// Re-sort the feed items using the new ranking
+	m.updateStreamItems()
+
+	return m, nil
+}
+
+// handleWorkEvent processes work pool events - must run regardless of modal view
+func (m Model) handleWorkEvent(msg WorkEventMsg) (tea.Model, tea.Cmd) {
+	event := msg.Event
+
+	// Handle specific work types that need to trigger UI updates
+	if event.Change == "completed" || event.Change == "failed" {
+		switch event.Item.Type {
+		case work.TypeFetch:
+			// Feed fetch completed - convert to ItemsLoadedMsg processing
+			var items []feeds.Item
+			if event.Item.Data != nil {
+				if fetched, ok := event.Item.Data.([]feeds.Item); ok {
+					items = fetched
+				}
+			}
+
+			// Create the message and process it
+			loadedMsg := ItemsLoadedMsg{
+				Items:      items,
+				SourceName: event.Item.Source,
+				Category:   event.Item.Category,
+				Err:        event.Item.Error,
+			}
+
+			// Process the items (this updates aggregator, store, etc.)
+			newModel, cmd := m.handleItemsLoaded(loadedMsg)
+			m = newModel.(Model)
+
+			// Re-subscribe and return any additional commands
+			return m, tea.Batch(cmd, m.subscribeWorkEvents())
+
+		case work.TypeRerank:
+			// Reranking completed - convert to RerankTopStoriesMsg
+			var stories []RerankStory
+			if event.Item.Data != nil {
+				if result, ok := event.Item.Data.(RerankResult); ok {
+					stories = result.Stories
+				}
+			}
+
+			rerankMsg := RerankTopStoriesMsg{
+				Stories: stories,
+				Rubric:  event.Item.Source, // We stored rubric name in Source
+				Err:     event.Item.Error,
+			}
+
+			// Process the rerank results
+			newModel, cmd := m.handleRerankTopStories(rerankMsg)
+			m = newModel.(Model)
+
+			return m, tea.Batch(cmd, m.subscribeWorkEvents())
+
+		case work.TypeAnalyze:
+			// AI analysis completed - could trigger UI update
+		}
+	}
+
+	// Always re-subscribe to get the next event
+	return m, m.subscribeWorkEvents()
 }
 
 // handleItemsLoaded processes items from a feed fetch - must run regardless of modal view
@@ -1309,6 +1537,53 @@ func (m Model) updateHelpView(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func (m Model) updateWorkView(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.KeyMsg:
+		switch msg.String() {
+		case "esc", "q":
+			m.mode = modeStream
+			return m, nil
+		case "p":
+			m.workView.TogglePending()
+		case "a":
+			m.workView.ToggleActive()
+		case "c":
+			m.workView.ToggleCompleted()
+		case "f":
+			m.workView.ToggleFailed()
+		case "x":
+			m.workView.ClearHistory()
+		case "1":
+			m.workView.SetFilterType(work.TypeFetch)
+		case "2":
+			m.workView.SetFilterType(work.TypeDedup)
+		case "3":
+			m.workView.SetFilterType(work.TypeRerank)
+		case "4":
+			m.workView.SetFilterType(work.TypeEmbed)
+		case "5":
+			m.workView.SetFilterType(work.TypeAnalyze)
+		case "0":
+			m.workView.ClearFilter()
+		}
+	case tea.WindowSizeMsg:
+		m.width = msg.Width
+		m.height = msg.Height
+		m.workView.SetSize(msg.Width, msg.Height)
+	case spinner.TickMsg:
+		var cmd tea.Cmd
+		s := m.workView.Spinner()
+		s, cmd = s.Update(msg)
+		m.workView.SetSpinner(s)
+		m.workView.Refresh() // Refresh snapshot on each tick
+		return m, tea.Batch(cmd, m.workView.Spinner().Tick) // Keep spinner ticking
+	}
+	// Refresh snapshot on every update
+	m.workView.Refresh()
+	return m, nil
+}
+
 func (m Model) renderHelpView() string {
 	titleStyle := lipgloss.NewStyle().
 		Bold(true).
@@ -1435,6 +1710,8 @@ func (m Model) View() string {
 		return m.briefingView.View()
 	case modeHelp:
 		return m.renderHelpView()
+	case modeWork:
+		return m.workView.View()
 	}
 
 	// Styles
@@ -1488,6 +1765,10 @@ func (m Model) View() string {
 	}
 	if health.Failing > 0 {
 		headerText += fmt.Sprintf("  │  %d failing", health.Failing)
+	}
+	// Show background work indicator (top stories refresh, embedding, etc.)
+	if m.stream.IsTopStoriesLoading() {
+		headerText += "  │  ⟳ ranking"
 	}
 	header := headerStyle.Render(headerText)
 
@@ -1637,45 +1918,55 @@ func (m Model) refreshDueSources() tea.Cmd {
 		return nil
 	}
 
-	var cmds []tea.Cmd
+	// Submit fetch work to the work pool
 	for _, s := range due {
 		state := s
 		m.aggregator.MarkFetching(state.Config.Name, true)
 
-		cmds = append(cmds, func() tea.Msg {
-			items, err := state.Source.Fetch()
-			return ItemsLoadedMsg{
-				Items:      items,
-				SourceName: state.Config.Name,
-				Category:   state.Config.Category,
-				Err:        err,
-			}
-		})
+		m.workPool.SubmitWithData(
+			work.TypeFetch,
+			fmt.Sprintf("Fetching %s", state.Config.Name),
+			state.Config.Name,
+			state.Config.Category,
+			func() (string, any, error) {
+				items, err := state.Source.Fetch()
+				if err != nil {
+					return "", nil, err
+				}
+				return fmt.Sprintf("%d items", len(items)), items, nil
+			},
+		)
 	}
 
-	return tea.Batch(cmds...)
+	// Work events will flow through handleWorkEvent
+	return nil
 }
 
 func (m Model) refreshAllSources() tea.Cmd {
 	states := m.aggregator.GetSourceStates()
 
-	var cmds []tea.Cmd
+	// Submit fetch work to the work pool for all sources
 	for _, s := range states {
 		state := s
 		m.aggregator.MarkFetching(state.Config.Name, true)
 
-		cmds = append(cmds, func() tea.Msg {
-			items, err := state.Source.Fetch()
-			return ItemsLoadedMsg{
-				Items:      items,
-				SourceName: state.Config.Name,
-				Category:   state.Config.Category,
-				Err:        err,
-			}
-		})
+		m.workPool.SubmitWithData(
+			work.TypeFetch,
+			fmt.Sprintf("Fetching %s", state.Config.Name),
+			state.Config.Name,
+			state.Config.Category,
+			func() (string, any, error) {
+				items, err := state.Source.Fetch()
+				if err != nil {
+					return "", nil, err
+				}
+				return fmt.Sprintf("%d items", len(items)), items, nil
+			},
+		)
 	}
 
-	return tea.Batch(cmds...)
+	// Work events will flow through handleWorkEvent
+	return nil
 }
 
 func (m Model) tickRefresh() tea.Cmd {
@@ -1931,13 +2222,131 @@ func readNextStreamChunk(itemID string, chunks <-chan brain.StreamChunk) tea.Cmd
 }
 
 func (m Model) analyzeTopStories() tea.Cmd {
+	// Prefer reranker if available
+	if m.reranker != nil && m.reranker.Available() {
+		return m.rerankTopStories()
+	}
+
+	// Fall back to LLM-based classification
+	return m.analyzeTopStoriesLLM()
+}
+
+// RerankResult holds the result of a rerank operation for passing through work pool
+type RerankResult struct {
+	Stories []RerankStory
+	Rubric  string
+}
+
+// rerankTopStories uses the ML reranker to identify top stories.
+// This is the preferred method - fast, deterministic, and reliable.
+// Submits work to the pool so it's visible in /w.
+func (m Model) rerankTopStories() tea.Cmd {
+	items := m.stream.GetRecentItems(6)
+	if len(items) == 0 {
+		items = m.aggregator.GetItems()
+	}
+
+	if len(items) == 0 {
+		return func() tea.Msg {
+			return RerankTopStoriesMsg{Err: fmt.Errorf("no items to rank")}
+		}
+	}
+
+	// Limit to reasonable batch size
+	maxItems := 200
+	if len(items) > maxItems {
+		items = items[:maxItems]
+	}
+
+	originalCount := len(items)
+
+	// Deduplicate using embeddings if available
+	embedDedupRef := m.embedDedup
+	if embedDedupRef != nil {
+		// Index items that don't have embeddings yet (runs inline for now)
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		embedDedupRef.IndexBatch(ctx, items)
+		cancel()
+
+		// Filter to primary items only
+		items = embedDedupRef.GetPrimaryItems(items)
+		logging.Info("Dedup filtered items", "original", originalCount, "unique", len(items))
+	}
+
+	if len(items) == 0 {
+		return func() tea.Msg {
+			return RerankTopStoriesMsg{Err: fmt.Errorf("no unique items to rank after dedup")}
+		}
+	}
+
+	// Build document list (title + summary)
+	docs := make([]string, len(items))
+	itemIDs := make([]string, len(items))
+	for i, item := range items {
+		doc := item.Title
+		if item.Summary != "" {
+			doc += " - " + item.Summary
+		}
+		// Truncate very long docs
+		if len(doc) > 300 {
+			doc = doc[:300]
+		}
+		docs[i] = doc
+		itemIDs[i] = item.ID
+	}
+
+	// Capture reranker reference for the closure
+	rerankerRef := m.reranker
+
+	// Submit reranking to work pool - results come through work events
+	m.workPool.SubmitWithData(
+		work.TypeRerank,
+		fmt.Sprintf("Reranking %d headlines", len(docs)),
+		"topstories",
+		"",
+		func() (string, any, error) {
+			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+			defer cancel()
+
+			rubric := rerank.GetRubric("topstories")
+			scores, err := rerankerRef.Rerank(ctx, rubric, docs)
+			if err != nil {
+				return "", nil, err
+			}
+
+			// Get ALL items sorted by relevance (for feed ordering)
+			sortedResults := rerank.SortedResults(scores)
+			stories := make([]RerankStory, len(sortedResults))
+			for i, r := range sortedResults {
+				stories[i] = RerankStory{
+					ItemID: itemIDs[r.Index],
+					Score:  r.Score,
+				}
+			}
+
+			result := RerankResult{
+				Stories: stories,
+				Rubric:  "topstories",
+			}
+
+			return fmt.Sprintf("ranked %d items", len(docs)), result, nil
+		},
+	)
+
+	// Work events will deliver the result through handleWorkEvent
+	return nil
+}
+
+// analyzeTopStoriesLLM uses the brain trust LLM to classify top stories.
+// This is the fallback when reranker is not available.
+func (m Model) analyzeTopStoriesLLM() tea.Cmd {
 	return func() tea.Msg {
 		// Get recent items (last 6 hours)
 		items := m.stream.GetRecentItems(6)
-		logging.Debug("analyzeTopStories - recent items", "count", len(items))
+		logging.Debug("analyzeTopStoriesLLM - recent items", "count", len(items))
 		if len(items) == 0 {
 			items = m.aggregator.GetItems()
-			logging.Debug("analyzeTopStories - using aggregator items", "count", len(items))
+			logging.Debug("analyzeTopStoriesLLM - using aggregator items", "count", len(items))
 		}
 
 		// Limit to recent items
@@ -1945,10 +2354,10 @@ func (m Model) analyzeTopStories() tea.Cmd {
 			items = items[:100]
 		}
 
-		logging.Info("analyzeTopStories - calling AnalyzeTopStories", "items", len(items))
+		logging.Info("analyzeTopStoriesLLM - calling AnalyzeTopStories", "items", len(items))
 		ctx := context.Background()
 		results, err := m.brainTrust.AnalyzeTopStories(ctx, items)
-		logging.Info("analyzeTopStories - got results", "results", len(results), "err", err)
+		logging.Info("analyzeTopStoriesLLM - got results", "results", len(results), "err", err)
 
 		return TopStoriesMsg{
 			Stories: results,

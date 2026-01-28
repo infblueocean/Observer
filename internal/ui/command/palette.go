@@ -28,6 +28,7 @@ func DefaultCommands() []Command {
 		{Name: "panel", Description: "Toggle source panel"},
 		{Name: "analyze", Aliases: []string{"ai", "brain", "braintrust"}, Description: "AI analysis of selected item", Key: "a"},
 		{Name: "top", Aliases: []string{"breaking", "headlines"}, Description: "Refresh top/breaking stories", Key: "T"},
+		{Name: "work", Aliases: []string{"w", "jobs", "queue"}, Description: "View async work queue"},
 		{Name: "help", Description: "Show help", Key: "?"},
 		{Name: "quit", Aliases: []string{"exit", "q"}, Description: "Exit Observer", Key: "q"},
 	}

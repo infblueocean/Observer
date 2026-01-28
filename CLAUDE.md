@@ -46,6 +46,9 @@ observer/
 │   │   └── cheap.go               # Regex-based extractors
 │   ├── curation/
 │   │   └── filter.go              # Filter engine (pattern + semantic)
+│   ├── embedding/                 # Vector embeddings for semantic dedup (v0.3)
+│   │   ├── embedder.go            # Embedder interface + Ollama implementation
+│   │   └── dedup.go               # HNSW-based duplicate detection
 │   ├── feeds/
 │   │   ├── types.go               # Core types (Item, Source)
 │   │   ├── sources.go             # 94 RSS feed configs
@@ -54,24 +57,35 @@ observer/
 │   │   ├── rss/source.go          # RSS fetcher
 │   │   ├── hackernews/source.go   # HN API client
 │   │   └── usgs/source.go         # Earthquake data
+│   ├── rerank/                    # ML-based headline reranking (v0.3)
+│   │   ├── reranker.go            # Reranker interface + helpers
+│   │   ├── ollama.go              # Ollama reranker implementation
+│   │   ├── rubric.go              # Ranking rubrics (topstories, breaking, etc.)
+│   │   └── factory.go             # Reranker factory
 │   ├── sampling/                  # Pluggable sampling strategies
 │   │   ├── queue.go               # SourceQueue with adaptive polling
 │   │   ├── manager.go             # QueueManager coordinates sources
 │   │   └── round_robin.go         # All sampler implementations
 │   ├── store/
 │   │   └── sqlite.go              # Persistence layer
+│   ├── work/                      # Unified async work pool (v0.3)
+│   │   ├── pool.go                # Work pool with event subscription
+│   │   ├── types.go               # Work item types (fetch, rerank, analyze)
+│   │   └── ring.go                # Ring buffer for history
 │   └── ui/
 │       ├── stream/model.go        # Main stream view
 │       ├── filters/
 │       │   ├── model.go           # Filter list UI
 │       │   └── workshop.go        # Interactive filter builder
+│       ├── workview/model.go      # Work queue visualization (/w)
 │       ├── configview/model.go    # Settings UI
 │       └── styles/theme.go        # Lip Gloss styles
 ├── go.mod
 ├── go.sum
 ├── CLAUDE.md                      # This file
 ├── SAMPLING_ARCHITECTURE.md       # Sampling strategies documentation
-└── CORRELATION_ENGINE.md          # Story clustering documentation
+├── CORRELATION_ENGINE.md          # Story clustering documentation
+└── V03_RANKING_PLAN.md            # v0.3 ranking system design
 ```
 
 ### Tech Stack
@@ -400,6 +414,86 @@ Transient error display:
 - Fades after 10 seconds of no new errors
 - All errors logged to `~/.observer/logs/observer-YYYY-MM-DD.log`
 
+### 13. ML-Based Ranking (v0.3)
+
+Replaces LLM classification with fast ML reranking for top stories and feed ordering.
+
+**Architecture:**
+```
+Items → Embed (mxbai-embed-large) → HNSW Dedup → Rerank (Qwen3-Reranker) → Feed
+```
+
+**Reranker (`internal/rerank/`):**
+- Uses Ollama with Qwen3-Reranker-4B model
+- Scores headlines against rubric queries (0-10 scale)
+- Rubrics: `topstories`, `breaking`, `tech`, `frontpage`
+- O(n) scoring, deterministic results
+
+**Rubric Example (topstories):**
+```
+Most important breaking news and major world developments that informed
+citizens should know about right now. Prioritize: geopolitical events,
+economic policy, major tech/science breakthroughs, significant legal rulings...
+```
+
+**Feed Ordering:**
+- Reranker scores all recent items by relevance
+- Top 8 go to "Top Stories" section
+- Full ranked list orders the main feed
+- Time bands (Just Now, Past Hour, etc.) are visual groupings
+- Items appear in relevance order within each time band
+
+### 14. Embedding-Based Deduplication (v0.3)
+
+Semantic duplicate detection using vector embeddings.
+
+**Architecture:**
+```
+Headlines → mxbai-embed-large → 1024-dim vectors → HNSW Index → Cosine Similarity
+```
+
+**Components:**
+- `internal/embedding/embedder.go` - Ollama embedding client
+- `internal/embedding/dedup.go` - HNSW-based dedup index
+- Uses `github.com/coder/hnsw` for O(log n) similarity search
+- 85% similarity threshold = duplicate
+
+**Flow:**
+1. Batch embed new items via Ollama
+2. HNSW finds nearest neighbors in O(log n)
+3. Group duplicates, track primary (first-seen)
+4. Filter to unique items before reranking
+
+**Why not SimHash?**
+- SimHash is lexical (misses "Fed raises rates" vs "Federal Reserve increases interest rates")
+- Embeddings are semantic (catches same story, different wording)
+
+### 15. Unified Work Pool (v0.3)
+
+All async operations flow through a single work pool for visibility and control.
+
+**Work Types:**
+- `TypeFetch` - Feed fetching
+- `TypeRerank` - ML reranking
+- `TypeAnalyze` - AI analysis
+- `TypeEmbed` - Embedding generation
+
+**Features:**
+- Event subscription for Bubble Tea integration
+- Ring buffer history (last 100 items)
+- Filter by type, status
+- `/w` command to view work queue
+
+**UI (`/w`):**
+```
+┌─ WORK QUEUE ─────────────────────────────┐
+│ ● Reranking 150 headlines    topstories  │
+│ ✓ Fetched Hacker News        12 items    │
+│ ✓ Fetched Reuters            8 items     │
+│ ○ Pending: Embed batch       45 items    │
+└──────────────────────────────────────────┘
+```
+
 ---
 
 ## Configuration
@@ -483,6 +577,7 @@ export XAI_API_KEY="..."
 | `/sources` | Open source manager |
 | `/config` | Open settings |
 | `/panel` | Toggle source panel |
+| `/w` | View async work queue (fetches, reranking, analysis) |
 | `/clearcache` | Clear top stories cache (if data gets corrupted) |
 
 ---
@@ -517,6 +612,18 @@ export XAI_API_KEY="..."
 - [x] Analysis includes "Connections" section linking to top stories
 - [x] Reason validation (rejects garbage LLM output)
 - [ ] Persona system (Historian, Skeptic, Optimist, Connector)
+
+### v0.3 Ranking System (DONE)
+- [x] Unified work pool for async operations
+- [x] Work queue visualization (`/w` command)
+- [x] ML reranker using Qwen3-Reranker-4B via Ollama
+- [x] Rubric-based scoring (topstories, breaking, tech, frontpage)
+- [x] Embedding-based deduplication (mxbai-embed-large)
+- [x] HNSW index for O(log n) similarity search
+- [x] Feed ordering by relevance (reranked items first)
+- [x] Top stories refresh runs in background (any view)
+- [x] Smooth UX during refresh (stories stay visible)
+- [x] Status bar indicator for background work
 
 ### Correlation Engine (NEW - See CORRELATION_ENGINE.md)
 *"Don't curate. Illuminate."*

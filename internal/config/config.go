@@ -216,6 +216,98 @@ func (c *Config) AutoPopulateFromEnv() {
 	}
 }
 
+// ExportToEnv sets environment variables from config so that
+// brain providers (which read from os.Getenv) can find the keys and models.
+// Returns count of keys exported.
+func (c *Config) ExportToEnv() int {
+	count := 0
+	if c.Models.Claude.APIKey != "" {
+		os.Setenv("ANTHROPIC_API_KEY", c.Models.Claude.APIKey)
+		count++
+	}
+	if c.Models.Claude.Model != "" {
+		os.Setenv("CLAUDE_MODEL", c.Models.Claude.Model)
+	}
+	if c.Models.OpenAI.APIKey != "" {
+		os.Setenv("OPENAI_API_KEY", c.Models.OpenAI.APIKey)
+		count++
+	}
+	if c.Models.OpenAI.Model != "" {
+		os.Setenv("OPENAI_MODEL", c.Models.OpenAI.Model)
+	}
+	if c.Models.Gemini.APIKey != "" {
+		os.Setenv("GOOGLE_API_KEY", c.Models.Gemini.APIKey)
+		count++
+	}
+	if c.Models.Gemini.Model != "" {
+		os.Setenv("GEMINI_MODEL", c.Models.Gemini.Model)
+	}
+	if c.Models.Grok.APIKey != "" {
+		os.Setenv("XAI_API_KEY", c.Models.Grok.APIKey)
+		count++
+	}
+	if c.Models.Grok.Model != "" {
+		os.Setenv("GROK_MODEL", c.Models.Grok.Model)
+	}
+	if c.Models.Ollama.Model != "" {
+		os.Setenv("OLLAMA_MODEL", c.Models.Ollama.Model)
+	}
+	if c.Models.Ollama.Endpoint != "" {
+		os.Setenv("OLLAMA_HOST", c.Models.Ollama.Endpoint)
+	}
+	return count
+}
+
+// ExportToEnvWithLogging sets environment variables and logs each one (for debugging)
+func (c *Config) ExportToEnvWithLogging(log func(msg string, args ...any)) int {
+	count := 0
+	if c.Models.Claude.APIKey != "" {
+		os.Setenv("ANTHROPIC_API_KEY", c.Models.Claude.APIKey)
+		log("Exported ANTHROPIC_API_KEY", "key_prefix", c.Models.Claude.APIKey[:min(10, len(c.Models.Claude.APIKey))]+"...")
+		count++
+	}
+	if c.Models.Claude.Model != "" {
+		os.Setenv("CLAUDE_MODEL", c.Models.Claude.Model)
+		log("Exported CLAUDE_MODEL", "model", c.Models.Claude.Model)
+	}
+	if c.Models.OpenAI.APIKey != "" {
+		os.Setenv("OPENAI_API_KEY", c.Models.OpenAI.APIKey)
+		log("Exported OPENAI_API_KEY", "key_prefix", c.Models.OpenAI.APIKey[:min(10, len(c.Models.OpenAI.APIKey))]+"...")
+		count++
+	}
+	if c.Models.OpenAI.Model != "" {
+		os.Setenv("OPENAI_MODEL", c.Models.OpenAI.Model)
+		log("Exported OPENAI_MODEL", "model", c.Models.OpenAI.Model)
+	}
+	if c.Models.Gemini.APIKey != "" {
+		os.Setenv("GOOGLE_API_KEY", c.Models.Gemini.APIKey)
+		log("Exported GOOGLE_API_KEY", "key_prefix", c.Models.Gemini.APIKey[:min(10, len(c.Models.Gemini.APIKey))]+"...")
+		count++
+	}
+	if c.Models.Gemini.Model != "" {
+		os.Setenv("GEMINI_MODEL", c.Models.Gemini.Model)
+		log("Exported GEMINI_MODEL", "model", c.Models.Gemini.Model)
+	}
+	if c.Models.Grok.APIKey != "" {
+		os.Setenv("XAI_API_KEY", c.Models.Grok.APIKey)
+		log("Exported XAI_API_KEY", "key_prefix", c.Models.Grok.APIKey[:min(10, len(c.Models.Grok.APIKey))]+"...")
+		count++
+	}
+	if c.Models.Grok.Model != "" {
+		os.Setenv("GROK_MODEL", c.Models.Grok.Model)
+		log("Exported GROK_MODEL", "model", c.Models.Grok.Model)
+	}
+	if c.Models.Ollama.Model != "" {
+		os.Setenv("OLLAMA_MODEL", c.Models.Ollama.Model)
+		log("Exported OLLAMA_MODEL", "model", c.Models.Ollama.Model)
+	}
+	if c.Models.Ollama.Endpoint != "" {
+		os.Setenv("OLLAMA_HOST", c.Models.Ollama.Endpoint)
+		log("Exported OLLAMA_HOST", "endpoint", c.Models.Ollama.Endpoint)
+	}
+	return count
+}
+
 // LoadKeysFromFile loads keys from a shell script (like keys.sh)
 func (c *Config) LoadKeysFromFile(path string) error {
 	data, err := os.ReadFile(path)

@@ -742,11 +742,15 @@ Output ONLY the pipe-separated lines. No other text. Remember: minimum 3 stories
 
 	logging.Info("Top stories LLM response", "content", resp.Content, "content_len", len(resp.Content))
 
-	// Parse the response - try pipe format first, then fallback to markdown
+	// Parse the response - try pipe format first, then fallbacks
 	results := parseTopStoriesPipeFormat(resp.Content, items, maxItems)
 	if len(results) == 0 {
 		logging.Debug("Pipe format parsing failed, trying markdown fallback")
 		results = parseTopStoriesMarkdown(resp.Content, items, maxItems)
+	}
+	if len(results) == 0 {
+		logging.Debug("Markdown parsing failed, trying number extraction fallback")
+		results = parseTopStoriesNumbers(resp.Content, items, maxItems)
 	}
 
 	// Build a map of item titles for caching
@@ -1468,6 +1472,8 @@ func parseTopStoriesPipeFormat(content string, items []feeds.Item, maxItems int)
 	var results []TopStoryResult
 	lines := strings.Split(content, "\n")
 
+	logging.Debug("Parsing top stories response", "content_preview", truncateStr(content, 200), "line_count", len(lines))
+
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
 		if line == "" {
@@ -1476,6 +1482,7 @@ func parseTopStoriesPipeFormat(content string, items []feeds.Item, maxItems int)
 
 		parts := strings.SplitN(line, "|", 3)
 		if len(parts) < 3 {
+			logging.Debug("Skipping line - not enough pipe parts", "line", truncateStr(line, 80), "parts", len(parts))
 			continue
 		}
 
@@ -1483,12 +1490,14 @@ func parseTopStoriesPipeFormat(content string, items []feeds.Item, maxItems int)
 		var itemNum int
 		fmt.Sscanf(strings.TrimSpace(parts[1]), "%d", &itemNum)
 		if itemNum < 1 || itemNum > maxItems {
+			logging.Debug("Skipping line - invalid item number", "line", truncateStr(line, 80), "itemNum", itemNum, "maxItems", maxItems)
 			continue
 		}
 
 		reason := strings.TrimSpace(parts[2])
 		fullLabel := mapLabel(label)
 		if fullLabel == "" {
+			logging.Debug("Skipping line - unknown label", "line", truncateStr(line, 80), "label", label)
 			continue
 		}
 
@@ -1663,17 +1672,77 @@ func parseTopStoriesMarkdown(content string, items []feeds.Item, maxItems int) [
 
 // mapLabel converts label string to conservative indicator
 // Uses neutral symbols since single hit might be noise from inconsistent LLM
+// Made more forgiving for small LLMs that may not follow exact format
 func mapLabel(label string) string {
-	switch strings.ToUpper(strings.TrimSpace(label)) {
-	case "BREAKING":
+	upper := strings.ToUpper(strings.TrimSpace(label))
+	// Remove common prefixes/suffixes small LLMs might add
+	upper = strings.TrimPrefix(upper, "**")
+	upper = strings.TrimSuffix(upper, "**")
+	upper = strings.TrimPrefix(upper, "- ")
+	upper = strings.TrimPrefix(upper, "* ")
+	upper = strings.TrimSpace(upper)
+
+	switch upper {
+	case "BREAKING", "BREAKING NEWS", "BREAK":
 		return "● NEW"
-	case "DEVELOPING":
+	case "DEVELOPING", "DEV", "ONGOING":
 		return "◐ EMERGING"
-	case "TOP", "TOP STORY":
+	case "TOP", "TOP STORY", "TOP NEWS", "IMPORTANT", "MAJOR", "SIGNIFICANT":
 		return "◦ NOTED"
 	default:
+		// Also check if the label contains any of the keywords
+		if strings.Contains(upper, "BREAKING") {
+			return "● NEW"
+		}
+		if strings.Contains(upper, "DEVELOPING") || strings.Contains(upper, "ONGOING") {
+			return "◐ EMERGING"
+		}
+		if strings.Contains(upper, "TOP") || strings.Contains(upper, "IMPORTANT") || strings.Contains(upper, "MAJOR") {
+			return "◦ NOTED"
+		}
 		return ""
 	}
+}
+
+// parseTopStoriesNumbers is a very lenient fallback that extracts any numbers from the response
+// This handles small LLMs that may just output "1, 5, 12" or "Headlines: 1 5 12" etc.
+func parseTopStoriesNumbers(content string, items []feeds.Item, maxItems int) []TopStoryResult {
+	var results []TopStoryResult
+	seen := make(map[int]bool)
+
+	// Try to find any numbers in the response that could be headline numbers
+	// Look for patterns like: "1", "#1", "1.", "1)", etc.
+	words := strings.Fields(content)
+	for _, word := range words {
+		// Strip common prefixes/suffixes
+		word = strings.TrimPrefix(word, "#")
+		word = strings.TrimPrefix(word, "(")
+		word = strings.TrimSuffix(word, ")")
+		word = strings.TrimSuffix(word, ".")
+		word = strings.TrimSuffix(word, ",")
+		word = strings.TrimSuffix(word, ":")
+
+		var num int
+		if _, err := fmt.Sscanf(word, "%d", &num); err == nil {
+			if num >= 1 && num <= maxItems && !seen[num] {
+				seen[num] = true
+				results = append(results, TopStoryResult{
+					ItemID: items[num-1].ID,
+					Label:  "◦ NOTED", // Default label since we don't know the type
+					Reason: "",
+				})
+				logging.Debug("Parsed top story (number extraction)", "itemNum", num)
+				if len(results) >= 6 { // Cap at 6 stories
+					break
+				}
+			}
+		}
+	}
+
+	if len(results) > 0 {
+		logging.Info("Number extraction fallback found stories", "count", len(results))
+	}
+	return results
 }
 
 // GetStreamingProvider returns a provider that supports streaming, or nil if none available

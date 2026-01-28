@@ -61,7 +61,7 @@ func GeminiConfig() *ProviderConfig {
 }
 
 func GrokConfig(useReasoning bool) *ProviderConfig {
-	model := "grok-3-fast"
+	model := getEnvOr("GROK_MODEL", "grok-3-fast")
 	name := "grok"
 	if useReasoning {
 		model = "grok-3"
@@ -416,6 +416,11 @@ func maxTokensOr(v, defaultVal int) int {
 
 // CreateAllProviders creates all configured providers
 func CreateAllProviders() []*HTTPProvider {
+	return CreateAllProvidersWithLogging(nil)
+}
+
+// CreateAllProvidersWithLogging creates all configured providers with optional logging
+func CreateAllProvidersWithLogging(log func(msg string, args ...any)) []*HTTPProvider {
 	configs := []*ProviderConfig{
 		ClaudeConfig(),
 		OpenAIConfig(),
@@ -429,6 +434,18 @@ func CreateAllProviders() []*HTTPProvider {
 		p := NewHTTPProvider(cfg)
 		if p.Available() {
 			providers = append(providers, p)
+			if log != nil {
+				log("Provider created", "name", cfg.Name, "model", cfg.Model)
+			}
+		} else {
+			if log != nil {
+				hasKey := cfg.APIKey != ""
+				keyPrefix := ""
+				if hasKey && len(cfg.APIKey) > 10 {
+					keyPrefix = cfg.APIKey[:10] + "..."
+				}
+				log("Provider skipped - not available", "name", cfg.Name, "has_api_key", hasKey, "key_prefix", keyPrefix)
+			}
 		}
 	}
 	return providers

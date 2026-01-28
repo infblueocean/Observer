@@ -3,6 +3,7 @@ package stream
 import (
 	"fmt"
 	"math"
+	"sort"
 	"strings"
 	"time"
 
@@ -254,6 +255,7 @@ type Model struct {
 	categories   map[string]string         // item ID -> category lookup
 	cursor       int
 	selectedID   string                    // Track selected item ID for stability during updates
+	userHasMoved bool                      // True once user navigates - then we track by ID
 	width        int
 	height       int
 	loading      bool
@@ -281,6 +283,10 @@ type Model struct {
 	scrollPos      float64 // Current animated scroll position
 	scrollVelocity float64 // Current scroll velocity
 	scrollTarget   float64 // Target scroll position (cursor)
+
+	// Relevance ranking from reranker (item IDs in relevance order)
+	rankedOrder map[string]int // item ID -> rank position (0 = most relevant)
+	hasRanking  bool           // True if we have valid ranking data
 }
 
 // New creates a new stream model
@@ -365,37 +371,62 @@ func (m *Model) SetSize(width, height int) {
 	m.height = height
 }
 
+// SetRankedOrder sets the relevance ranking from the reranker.
+// Items will be sorted by this ranking (most relevant first).
+// itemIDs should be in relevance order (best first).
+func (m *Model) SetRankedOrder(itemIDs []string) {
+	m.rankedOrder = make(map[string]int, len(itemIDs))
+	for i, id := range itemIDs {
+		m.rankedOrder[id] = i
+	}
+	m.hasRanking = len(itemIDs) > 0
+}
+
+// ClearRankedOrder removes ranking data (falls back to chronological)
+func (m *Model) ClearRankedOrder() {
+	m.rankedOrder = nil
+	m.hasRanking = false
+}
+
+// HasRanking returns true if relevance ranking is available
+func (m Model) HasRanking() bool {
+	return m.hasRanking
+}
+
 // SetItems replaces the current items
 func (m *Model) SetItems(items []feeds.Item) {
-	// Remember currently selected item ID for stability
-	var previousSelectedID string
-	if m.cursor >= 0 && m.cursor < len(m.items) {
-		previousSelectedID = m.items[m.cursor].ID
+	// Sort items by relevance ranking if available, otherwise interleave by source
+	if m.hasRanking && len(m.rankedOrder) > 0 {
+		m.items = m.sortByRelevance(items)
+	} else {
+		// Fallback: interleave sources for diversity
+		m.items = interleaveBySource(items, 50)
 	}
-	if m.selectedID != "" {
-		previousSelectedID = m.selectedID
-	}
-
-	// Interleave sources for diversity (no time band grouping)
-	m.items = interleaveBySource(items, 50) // Max 50 items per source total
 	m.loading = false
 
-	// Try to restore cursor to the same item (by ID) after update
-	foundPrevious := false
-	if previousSelectedID != "" {
+	// Only track selection by ID if user has manually navigated
+	// Otherwise keep cursor at position 0 (top of list)
+	if m.userHasMoved && m.selectedID != "" {
+		// Try to restore cursor to the same item (by ID) after update
 		for i, item := range m.items {
-			if item.ID == previousSelectedID {
+			if item.ID == m.selectedID {
 				m.cursor = i
-				m.selectedID = previousSelectedID
-				foundPrevious = true
-				break
+				return
 			}
 		}
-	}
-
-	// Item not found in new list, clamp cursor to valid range
-	if !foundPrevious && m.cursor >= len(m.items) {
-		m.cursor = max(0, len(m.items)-1)
+		// Item no longer in list - stay at current position but clamp
+		if m.cursor >= len(m.items) {
+			m.cursor = max(0, len(m.items)-1)
+		}
+		if m.cursor >= 0 && m.cursor < len(m.items) {
+			m.selectedID = m.items[m.cursor].ID
+		}
+	} else {
+		// During init (user hasn't moved yet), keep cursor at top
+		m.cursor = 0
+		if len(m.items) > 0 {
+			m.selectedID = m.items[0].ID
+		}
 	}
 
 	// Calculate source activity stats
@@ -411,6 +442,41 @@ func (m *Model) SetItems(items []feeds.Item) {
 		}
 		m.sourceStats[item.SourceName] = stats
 	}
+}
+
+// sortByRelevance orders items by their reranker relevance score.
+// Ranked items come first (in relevance order), unranked items follow (chronologically).
+func (m *Model) sortByRelevance(items []feeds.Item) []feeds.Item {
+	if len(items) == 0 {
+		return items
+	}
+
+	// Separate ranked and unranked items
+	var ranked, unranked []feeds.Item
+	for _, item := range items {
+		if _, ok := m.rankedOrder[item.ID]; ok {
+			ranked = append(ranked, item)
+		} else {
+			unranked = append(unranked, item)
+		}
+	}
+
+	// Sort ranked items by their rank position (lower = more relevant)
+	sort.Slice(ranked, func(i, j int) bool {
+		return m.rankedOrder[ranked[i].ID] < m.rankedOrder[ranked[j].ID]
+	})
+
+	// Sort unranked items chronologically (newest first)
+	sort.Slice(unranked, func(i, j int) bool {
+		return unranked[i].Published.After(unranked[j].Published)
+	})
+
+	// Combine: ranked items first, then unranked
+	result := make([]feeds.Item, 0, len(items))
+	result = append(result, ranked...)
+	result = append(result, unranked...)
+
+	return result
 }
 
 // SetTopStories sets the AI-identified top stories with deduplication and source balancing
@@ -536,6 +602,11 @@ func (m Model) TopStoriesTimeUntilRefresh() int {
 // SetTopStoriesLoading sets the loading state for top stories
 func (m *Model) SetTopStoriesLoading(loading bool) {
 	m.topStoriesLoading = loading
+}
+
+// IsTopStoriesLoading returns true if top stories are currently being refreshed
+func (m Model) IsTopStoriesLoading() bool {
+	return m.topStoriesLoading
 }
 
 // ResetTopStoriesRefresh resets the refresh timer without clearing stories
@@ -666,6 +737,7 @@ func (m *Model) MoveUp() {
 	if m.cursor > 0 {
 		m.cursor--
 		m.scrollTarget = float64(m.cursor)
+		m.userHasMoved = true // Start tracking by ID after user navigates
 		// Update selectedID for stability during feed updates
 		items := m.getFilteredItems()
 		if m.cursor >= 0 && m.cursor < len(items) {
@@ -680,6 +752,7 @@ func (m *Model) MoveDown() {
 	if m.cursor < len(items)-1 {
 		m.cursor++
 		m.scrollTarget = float64(m.cursor)
+		m.userHasMoved = true // Start tracking by ID after user navigates
 		// Update selectedID for stability during feed updates
 		if m.cursor >= 0 && m.cursor < len(items) {
 			m.selectedID = items[m.cursor].ID
@@ -798,20 +871,27 @@ func (m Model) renderTopStoriesSection() []string {
 	dividerStyle := lipgloss.NewStyle().
 		Foreground(lipgloss.Color("#f85149"))
 
-	// Build header with refresh progress bar
+	// Add spacing buffer between status bar and top stories
+	lines = append(lines, "")
+
+	// Build header with refresh progress bar or loading indicator
 	headerText := "━━━ TOP STORIES ━━━"
-	if len(m.topStories) > 0 && !m.topStoriesLoading {
-		// Add a cool refresh timer widget
+	if m.topStoriesLoading {
+		// Show spinner in header while refreshing (keeps existing stories visible)
+		headerText = fmt.Sprintf("━━━ TOP STORIES %s ⟳ ━━━", m.spinner.View())
+	} else if len(m.topStories) > 0 {
+		// Normal state: show countdown timer
 		timerWidget := m.renderRefreshTimer()
 		headerText = fmt.Sprintf("━━━ TOP STORIES %s ━━━", timerWidget)
 	}
 	lines = append(lines, headerStyle.Render(headerText))
 
-	if m.topStoriesLoading {
+	// If loading but we have no stories yet, show a helpful message
+	if m.topStoriesLoading && len(m.topStories) == 0 {
 		loadingStyle := lipgloss.NewStyle().
 			Foreground(lipgloss.Color("#8b949e")).
 			Italic(true)
-		lines = append(lines, loadingStyle.Render(fmt.Sprintf("  %s Analyzing headlines...", m.spinner.View())))
+		lines = append(lines, loadingStyle.Render("  Analyzing headlines..."))
 		return lines
 	}
 
@@ -919,16 +999,28 @@ func (m Model) renderTopStoriesSection() []string {
 			}
 		}
 
-		// Format: [LABEL] Title · Source [streak]
+		// Extract relevance score if present (tuck into line subtly)
+		relevanceIndicator := ""
+		isRelevanceReason := strings.HasPrefix(story.Reason, "Relevance:")
+		if isRelevanceReason {
+			// Extract percentage and show subtly
+			relevanceStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#6e7681"))
+			// Parse "Relevance: 85%" -> "85%"
+			pct := strings.TrimPrefix(story.Reason, "Relevance: ")
+			relevanceIndicator = relevanceStyle.Render(" " + pct)
+		}
+
+		// Format: [LABEL] Title · Source [streak] [relevance%]
 		label := labelStyle.Render(story.Label)
-		title := titleStyle.Render(truncate(story.Item.Title, m.width-35))
+		title := titleStyle.Render(truncate(story.Item.Title, m.width-40))
 		source := sourceStyle.Render(" · " + story.Item.SourceName)
 
-		lines = append(lines, fmt.Sprintf("  %s %s%s%s", label, title, source, streakIndicator))
+		lines = append(lines, fmt.Sprintf("  %s %s%s%s%s", label, title, source, streakIndicator, relevanceIndicator))
 
-		// Show zinger (preferred) or reason, skip for fading stories
+		// Show zinger if available (skip raw relevance scores), skip for fading stories
 		displayText := story.Zinger
-		if displayText == "" {
+		if displayText == "" && !isRelevanceReason {
+			// Only use Reason if it's not just a relevance score
 			displayText = story.Reason
 		}
 		if displayText != "" && !isFading {

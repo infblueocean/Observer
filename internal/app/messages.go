@@ -4,6 +4,7 @@ import (
 	"github.com/abelbrown/observer/internal/brain"
 	"github.com/abelbrown/observer/internal/correlation"
 	"github.com/abelbrown/observer/internal/feeds"
+	"github.com/abelbrown/observer/internal/work"
 )
 
 // Messages for Bubble Tea
@@ -68,4 +69,22 @@ type ShowBriefingMsg struct{}
 // streamTickMsg is used to add a render delay between streaming chunks
 type streamTickMsg struct {
 	itemID string
+}
+
+// WorkEventMsg wraps events from the work pool for Bubble Tea
+type WorkEventMsg struct {
+	Event work.Event
+}
+
+// RerankTopStoriesMsg is sent when reranker-based top stories completes
+type RerankTopStoriesMsg struct {
+	Stories []RerankStory
+	Rubric  string
+	Err     error
+}
+
+// RerankStory represents a top story identified by the reranker
+type RerankStory struct {
+	ItemID string
+	Score  float64
 }
