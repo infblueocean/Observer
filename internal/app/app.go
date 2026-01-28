@@ -515,6 +515,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Items have been saved to DB and processed - no action needed
 		// This just acknowledges the async work completed
 		logging.Debug("Items persisted", "count", msg.Count)
+		return m, nil
 
 	case TickMsg:
 		// Clear error pane after 10 seconds of no new errors
