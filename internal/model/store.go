@@ -49,6 +49,12 @@ func NewStore(dbPath string) (*Store, error) {
 		return nil, fmt.Errorf("failed to enable WAL mode: %w", err)
 	}
 
+	// Enable foreign key constraints
+	if _, err := db.Exec("PRAGMA foreign_keys = ON"); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("failed to enable foreign keys: %w", err)
+	}
+
 	s := &Store{db: db}
 	if err := s.migrate(); err != nil {
 		db.Close()
@@ -100,6 +106,38 @@ func (s *Store) migrate() error {
 		ended_at DATETIME,
 		items_viewed INTEGER DEFAULT 0
 	);
+
+	-- AI analyses
+	CREATE TABLE IF NOT EXISTS analyses (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		item_id TEXT NOT NULL,
+		provider TEXT NOT NULL,
+		model TEXT,
+		prompt TEXT,
+		raw_response TEXT NOT NULL,
+		content TEXT NOT NULL,
+		error TEXT,
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		FOREIGN KEY (item_id) REFERENCES items(id)
+	);
+
+	CREATE INDEX IF NOT EXISTS idx_analyses_item ON analyses(item_id);
+	CREATE INDEX IF NOT EXISTS idx_analyses_created ON analyses(created_at DESC);
+
+	-- Top stories cache
+	CREATE TABLE IF NOT EXISTS top_stories_cache (
+		item_id TEXT PRIMARY KEY,
+		title TEXT NOT NULL,
+		label TEXT NOT NULL,
+		reason TEXT,
+		zinger TEXT,
+		first_seen DATETIME NOT NULL,
+		last_seen DATETIME NOT NULL,
+		hit_count INTEGER DEFAULT 1,
+		miss_count INTEGER DEFAULT 0
+	);
+
+	CREATE INDEX IF NOT EXISTS idx_top_stories_last_seen ON top_stories_cache(last_seen DESC);
 	`
 	if _, err := s.db.Exec(schema); err != nil {
 		return err
@@ -431,6 +469,133 @@ func (s *Store) DB() *sql.DB {
 	return s.db
 }
 
+// AnalysisRecord represents a stored AI analysis.
+type AnalysisRecord struct {
+	ID          int64
+	ItemID      string
+	Provider    string
+	Model       string
+	Prompt      string
+	RawResponse string
+	Content     string
+	Error       string
+	CreatedAt   time.Time
+}
+
+// SaveAnalysis saves an AI analysis to the database.
+func (s *Store) SaveAnalysis(itemID, provider, model, prompt, rawResponse, content, errMsg string) error {
+	_, err := s.db.Exec(`
+		INSERT INTO analyses (item_id, provider, model, prompt, raw_response, content, error)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
+	`, itemID, provider, model, prompt, rawResponse, content, errMsg)
+	if err != nil {
+		logging.Error("Failed to save analysis", "item_id", itemID, "error", err)
+		return fmt.Errorf("failed to save analysis: %w", err)
+	}
+	logging.Info("Analysis saved", "item_id", itemID, "provider", provider, "content_len", len(content))
+	return nil
+}
+
+// GetAnalysisContent retrieves just the content fields for an item's analysis.
+// This is the simpler interface used by brain trust.
+func (s *Store) GetAnalysisContent(itemID string) (content, provider, model string, found bool) {
+	err := s.db.QueryRow(`
+		SELECT content, provider, model
+		FROM analyses
+		WHERE item_id = ? AND content != ''
+		ORDER BY created_at DESC
+		LIMIT 1
+	`, itemID).Scan(&content, &provider, &model)
+	if err != nil {
+		return "", "", "", false
+	}
+	return content, provider, model, true
+}
+
+// GetAnalysis retrieves the most recent analysis for an item.
+func (s *Store) GetAnalysis(itemID string) (*AnalysisRecord, error) {
+	var record AnalysisRecord
+	var errMsg sql.NullString
+	err := s.db.QueryRow(`
+		SELECT id, item_id, provider, model, prompt, raw_response, content, error, created_at
+		FROM analyses
+		WHERE item_id = ?
+		ORDER BY created_at DESC
+		LIMIT 1
+	`, itemID).Scan(
+		&record.ID,
+		&record.ItemID,
+		&record.Provider,
+		&record.Model,
+		&record.Prompt,
+		&record.RawResponse,
+		&record.Content,
+		&errMsg,
+		&record.CreatedAt,
+	)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to get analysis: %w", err)
+	}
+	record.Error = errMsg.String
+	return &record, nil
+}
+
+// GetAllAnalysesForItem retrieves all analyses for an item (history).
+func (s *Store) GetAllAnalysesForItem(itemID string) ([]AnalysisRecord, error) {
+	rows, err := s.db.Query(`
+		SELECT id, item_id, provider, model, prompt, raw_response, content, error, created_at
+		FROM analyses
+		WHERE item_id = ?
+		ORDER BY created_at DESC
+	`, itemID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query analyses: %w", err)
+	}
+	defer rows.Close()
+
+	var records []AnalysisRecord
+	for rows.Next() {
+		var record AnalysisRecord
+		var errMsg sql.NullString
+		err := rows.Scan(
+			&record.ID,
+			&record.ItemID,
+			&record.Provider,
+			&record.Model,
+			&record.Prompt,
+			&record.RawResponse,
+			&record.Content,
+			&errMsg,
+			&record.CreatedAt,
+		)
+		if err != nil {
+			logging.Warn("Failed to scan analysis row", "error", err)
+			continue
+		}
+		record.Error = errMsg.String
+		records = append(records, record)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating analysis rows: %w", err)
+	}
+
+	return records, nil
+}
+
+// AnalysisCount returns total analysis count.
+func (s *Store) AnalysisCount() (int, error) {
+	var count int
+	err := s.db.QueryRow("SELECT COUNT(*) FROM analyses").Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("failed to count analyses: %w", err)
+	}
+	return count, nil
+}
+
 // SaveEmbedding saves the embedding vector for a single item.
 // Returns an error if the item does not exist.
 func (s *Store) SaveEmbedding(id string, embedding []float32) error {
@@ -653,4 +818,101 @@ func float32ToBits(f float32) uint32 {
 // bitsToFloat32 converts IEEE 754 bits back to float32.
 func bitsToFloat32(bits uint32) float32 {
 	return math.Float32frombits(bits)
+}
+
+// TopStoryCacheEntry represents a cached top story.
+type TopStoryCacheEntry struct {
+	ItemID    string
+	Title     string
+	Label     string
+	Reason    string
+	Zinger    string
+	FirstSeen time.Time
+	LastSeen  time.Time
+	HitCount  int
+	MissCount int
+}
+
+// SaveTopStoriesCache saves the top stories cache to the database.
+func (s *Store) SaveTopStoriesCache(entries []TopStoryCacheEntry) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	// Clear old entries (older than 48 hours)
+	_, err = tx.Exec("DELETE FROM top_stories_cache WHERE last_seen < ?", time.Now().UTC().Add(-48*time.Hour))
+	if err != nil {
+		return fmt.Errorf("failed to clear old cache entries: %w", err)
+	}
+
+	stmt, err := tx.Prepare(`
+		INSERT INTO top_stories_cache (item_id, title, label, reason, zinger, first_seen, last_seen, hit_count, miss_count)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(item_id) DO UPDATE SET
+			title = excluded.title,
+			label = excluded.label,
+			reason = excluded.reason,
+			zinger = excluded.zinger,
+			last_seen = excluded.last_seen,
+			hit_count = excluded.hit_count,
+			miss_count = excluded.miss_count
+	`)
+	if err != nil {
+		return fmt.Errorf("failed to prepare statement: %w", err)
+	}
+	defer stmt.Close()
+
+	for _, e := range entries {
+		_, err = stmt.Exec(e.ItemID, e.Title, e.Label, e.Reason, e.Zinger, e.FirstSeen, e.LastSeen, e.HitCount, e.MissCount)
+		if err != nil {
+			logging.Error("Failed to save top story cache entry", "item_id", e.ItemID, "error", err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("failed to commit transaction: %w", err)
+	}
+
+	logging.Debug("Top stories cache saved", "count", len(entries))
+	return nil
+}
+
+// LoadTopStoriesCache loads the top stories cache from the database.
+func (s *Store) LoadTopStoriesCache() ([]TopStoryCacheEntry, error) {
+	// Only load recent entries (last 48 hours) - matches deletion window in SaveTopStoriesCache
+	rows, err := s.db.Query(`
+		SELECT item_id, title, label, reason, zinger, first_seen, last_seen, hit_count, miss_count
+		FROM top_stories_cache
+		WHERE last_seen > ?
+		ORDER BY hit_count DESC
+	`, time.Now().UTC().Add(-48*time.Hour))
+	if err != nil {
+		return nil, fmt.Errorf("failed to query top stories cache: %w", err)
+	}
+	defer rows.Close()
+
+	var entries []TopStoryCacheEntry
+	for rows.Next() {
+		var e TopStoryCacheEntry
+		var title, label, reason, zinger sql.NullString
+		err := rows.Scan(&e.ItemID, &title, &label, &reason, &zinger, &e.FirstSeen, &e.LastSeen, &e.HitCount, &e.MissCount)
+		if err != nil {
+			logging.Warn("Failed to scan top story cache row", "error", err)
+			continue
+		}
+		e.Title = title.String
+		e.Label = label.String
+		e.Reason = reason.String
+		e.Zinger = zinger.String
+		entries = append(entries, e)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating top stories cache rows: %w", err)
+	}
+
+	logging.Debug("Top stories cache loaded", "count", len(entries))
+	return entries, nil
 }
