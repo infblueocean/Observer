@@ -723,27 +723,121 @@ export XAI_API_KEY="..."
 - [x] Work view highlights fresh completions (< 3s)
 - [x] Spinner ticks forwarded properly in work view
 
-### v0.5 Reranking Feed Selection (TODO)
-Fix feedback loop bug where reranking selects from already-ranked items.
+### v0.5 Filter Pipeline Architecture (TODO)
+*"Reranking is just filtering"*
 
-**Current (broken):**
+#### The Insight
+
+Instead of scoring everything and sorting, think of it as a filter pipeline:
+- Cheap filters run first (time, dedup)
+- Expensive filters (LLM) only see pre-filtered candidates
+- Each filter is pass/fail, not a score
+- What survives the pipeline is the feed
+
+#### MVC Pattern
+
 ```
-m.stream.GetRecentItems(6)  →  items sorted by PREVIOUS ranking
-items[:200]                 →  same "top 200" re-ranked repeatedly
+┌─────────────────────────────────────────────────────────────────┐
+│                           MODEL                                  │
+│  SQLite: 12k items, each with embedding vector                  │
+│  Source of truth, persisted, complete                           │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                        CONTROLLER                                │
+│  Filter Pipeline: Time → Embedding → Dedup → Relevance          │
+│  Decides what flows from Model to View                          │
+│  Stateless, composable, testable                                │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                           VIEW                                   │
+│  Bubble Tea UI: stream, top stories, work queue                 │
+│  Renders what Controller provides                               │
+└─────────────────────────────────────────────────────────────────┘
 ```
 
-**Fixed:**
+#### Filter Pipeline
+
 ```
-m.aggregator.GetItems()     →  raw items from all sources
-filter to last 6 hours      →  recency filter
-sort by Published time      →  newest first
-items[:200]                 →  NEWEST 200 get ranked
+12k items in DB
+      │
+      ▼
+┌─────────────────────────────────┐
+│ Time Filter                     │  SQL: WHERE published > now - 6h
+│ Cost: O(1) - DB index           │
+└─────────────────────────────────┘
+      │ ~500 items
+      ▼
+┌─────────────────────────────────┐
+│ Embedding Filter                │  HNSW: similar to "important news"
+│ Cost: O(log n)                  │  + time decay penalty
+└─────────────────────────────────┘
+      │ ~200 items
+      ▼
+┌─────────────────────────────────┐
+│ Dedup Filter                    │  Keep primary, drop duplicates
+│ Cost: O(1) lookup               │
+└─────────────────────────────────┘
+      │ ~150 items
+      ▼
+┌─────────────────────────────────┐
+│ Relevance Filter                │  Reranker: "important?" yes/no
+│ Cost: O(n) but n is small now   │
+└─────────────────────────────────┘
+      │ ~50 items
+      ▼
+   Feed
 ```
 
-- [ ] Get items from aggregator (not pre-sorted stream)
-- [ ] Sort by publish time before selecting
-- [ ] Ensure new items always get chance to rank
-- [ ] Consider: pure Go reranker via hugot/ONNX (no Ollama dependency)
+#### Key Changes from Current Architecture
+
+**Currently mixing concerns:**
+- Aggregator holds items in memory (shadow Model)
+- Stream model does filtering AND rendering
+- Reranker called ad-hoc from app.go
+- Embeddings only used for dedup, not stored
+
+**Clean separation:**
+```go
+// Model - just data
+store.GetItems()           // All items from DB
+store.GetEmbedding(id)     // Vector for item
+
+// Controller - filter pipeline
+pipeline := NewPipeline().
+    Add(TimeFilter{MaxAge: 6*time.Hour}).
+    Add(EmbeddingFilter{Threshold: 0.7}).
+    Add(DedupFilter{}).
+    Add(RelevanceFilter{Model: reranker})
+
+items := pipeline.Run(store.GetItems())
+
+// View - just renders
+stream.SetItems(items)
+```
+
+#### Embedding Strategy
+
+Every item gets an embedding on insert:
+- Stored in DB alongside item
+- Used for similarity filtering (not just dedup)
+- Time-decay applied at query time: `score = cosineSim * 0.5^(age/halfLife)`
+- Older items effectively "farther away"
+
+#### Implementation Tasks
+
+- [ ] Store embeddings in SQLite (new column or separate table)
+- [ ] Load items from DB on startup (leverage persistence)
+- [ ] Create Filter interface and pipeline runner
+- [ ] Implement TimeFilter (SQL-level)
+- [ ] Implement EmbeddingFilter (HNSW + time decay)
+- [ ] Implement DedupFilter (existing logic)
+- [ ] Implement RelevanceFilter (reranker as yes/no)
+- [ ] Remove in-memory aggregator shadow state
+- [ ] Unify curation/filter.go with new pipeline
 
 ### Correlation Engine (NEW - See CORRELATION_ENGINE.md)
 *"Don't curate. Illuminate."*
