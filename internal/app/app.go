@@ -371,6 +371,33 @@ func (m Model) subscribeCorrelation() tea.Cmd {
 
 // Update handles messages
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	// Handle tick messages globally - these must always run to keep the app alive
+	// regardless of which modal view is active
+	if _, ok := msg.(TickMsg); ok {
+		// Clear error pane after 10 seconds of no new errors
+		if len(m.recentErrors) > 0 && time.Since(m.lastErrorTime) > 10*time.Second {
+			m.recentErrors = nil
+		}
+
+		// Auto-refresh top stories every 30 seconds (only in stream mode)
+		var topStoriesCmd tea.Cmd
+		if m.mode == modeStream && m.stream.TopStoriesNeedsRefresh() && m.aggregator.ItemCount() > 10 {
+			logging.Info("Auto-refreshing top stories")
+			m.stream.SetTopStoriesLoading(true)
+			topStoriesCmd = tea.Batch(m.analyzeTopStories(), m.stream.Spinner().Tick)
+		}
+
+		// Update smooth scroll animation
+		m.stream.UpdateScroll()
+
+		// Always schedule the next tick and refresh due sources
+		return m, tea.Batch(
+			m.refreshDueSources(),
+			m.tickRefresh(),
+			topStoriesCmd,
+		)
+	}
+
 	// Handle modal views
 	switch m.mode {
 	case modeFilters:
@@ -516,29 +543,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// This just acknowledges the async work completed
 		logging.Debug("Items persisted", "count", msg.Count)
 		return m, nil
-
-	case TickMsg:
-		// Clear error pane after 10 seconds of no new errors
-		if len(m.recentErrors) > 0 && time.Since(m.lastErrorTime) > 10*time.Second {
-			m.recentErrors = nil
-		}
-
-		// Auto-refresh top stories every 30 seconds
-		var topStoriesCmd tea.Cmd
-		if m.stream.TopStoriesNeedsRefresh() && m.aggregator.ItemCount() > 10 {
-			logging.Info("Auto-refreshing top stories")
-			m.stream.SetTopStoriesLoading(true)
-			topStoriesCmd = tea.Batch(m.analyzeTopStories(), m.stream.Spinner().Tick)
-		}
-
-		// Update smooth scroll animation
-		m.stream.UpdateScroll()
-
-		return m, tea.Batch(
-			m.refreshDueSources(),
-			m.tickRefresh(),
-			topStoriesCmd,
-		)
 
 	case BrainTrustAnalysisMsg:
 		// Update AI Analysis panel with new analysis
