@@ -1,3 +1,5 @@
+//go:build ignore
+
 // Package filters provides built-in filter implementations for Observer v0.5.
 //
 // All filters in this package are safe for concurrent use and respect context cancellation.

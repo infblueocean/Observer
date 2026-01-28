@@ -1,3 +1,5 @@
+//go:build ignore
+
 // Package view provides the UI layer for Observer v0.5.
 //
 // The view layer renders data from controllers and handles user input.

@@ -1,3 +1,5 @@
+//go:build ignore
+
 // Package controller implements the Controller layer of Observer's MVC architecture.
 //
 // Controllers sit between Model (data) and View (UI), deciding what data flows through.

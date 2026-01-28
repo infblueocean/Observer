@@ -1,3 +1,5 @@
+//go:build ignore
+
 // Package stream provides the main feed view for Observer v0.5.
 package stream
 

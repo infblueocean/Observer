@@ -25,7 +25,7 @@ import (
 	"github.com/abelbrown/observer/internal/rerank"
 	"github.com/abelbrown/observer/internal/sampling"
 	"github.com/abelbrown/observer/internal/selection"
-	"github.com/abelbrown/observer/internal/store"
+	"github.com/abelbrown/observer/internal/model"
 	"github.com/abelbrown/observer/internal/ui/braintrust"
 	"github.com/abelbrown/observer/internal/ui/briefing"
 	"github.com/abelbrown/observer/internal/ui/command"
@@ -78,7 +78,7 @@ type Model struct {
 	sourceManager     *curation.SourceManager
 	aggregator        *feeds.Aggregator
 	queueManager      *sampling.QueueManager // New: per-source queues with adaptive polling
-	store             *store.Store
+	store             *model.Store
 	config            *config.Config
 	correlationEngine *correlation.Engine
 	workPool          *work.Pool        // Unified async work pool
@@ -157,7 +157,7 @@ func New() (Model, error) {
 	dbPath := filepath.Join(homeDir, ".observer", "observer.db")
 	os.MkdirAll(filepath.Dir(dbPath), 0755)
 
-	st, err := store.New(dbPath)
+	st, err := model.NewStore(dbPath)
 	if err != nil {
 		logging.Error("Failed to initialize SQLite store - correlation disabled", "path", dbPath, "error", err)
 		st = nil
@@ -1182,9 +1182,9 @@ func (m *Model) saveAndClose() {
 	// Save top stories cache
 	brainEntries := m.brainTrust.ExportTopStoriesCache()
 	if len(brainEntries) > 0 {
-		storeEntries := make([]store.TopStoryCacheEntry, len(brainEntries))
+		storeEntries := make([]model.TopStoryCacheEntry, len(brainEntries))
 		for i, e := range brainEntries {
-			storeEntries[i] = store.TopStoryCacheEntry{
+			storeEntries[i] = model.TopStoryCacheEntry{
 				ItemID:    e.ItemID,
 				Title:     e.Title,
 				Label:     e.Label,
@@ -1446,7 +1446,8 @@ func (m Model) handleItemsLoaded(msg ItemsLoadedMsg) (tea.Model, tea.Cmd) {
 	cmd := func() tea.Msg {
 		// Save to store (DB I/O - can be slow)
 		if store != nil {
-			store.SaveItems(items)
+			modelItems := model.FromFeedsItems(items)
+			store.SaveItems(modelItems)
 		}
 		// Process through correlation engine
 		if engine != nil && len(items) <= 50 {

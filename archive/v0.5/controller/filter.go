@@ -1,3 +1,5 @@
+//go:build ignore
+
 // Package controller provides the filter pipeline architecture for Observer v0.5.
 //
 // Controllers sit between Model (SQLite) and View (UI), deciding what data flows through.

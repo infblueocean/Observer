@@ -1,3 +1,5 @@
+//go:build ignore
+
 // Package work provides the work queue visualization for Observer v0.5.
 package work
 

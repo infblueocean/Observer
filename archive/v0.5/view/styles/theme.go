@@ -1,3 +1,5 @@
+//go:build ignore
+
 // Package styles provides Lip Gloss styling for Observer v0.5.
 package styles
 

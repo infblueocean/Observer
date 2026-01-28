@@ -1,3 +1,5 @@
+//go:build ignore
+
 // Observer v0.5 - MVC Architecture Rewrite
 //
 // Architecture Overview:

@@ -439,6 +439,25 @@ func (s *Store) SourceCount() (int, error) {
 	return count, err
 }
 
+// GetLastSession returns when the user was last active.
+// Returns zero time if no previous session exists.
+func (s *Store) GetLastSession() (time.Time, error) {
+	var endedAt sql.NullTime
+	err := s.db.QueryRow(`
+		SELECT ended_at FROM sessions
+		WHERE ended_at IS NOT NULL
+		ORDER BY ended_at DESC
+		LIMIT 1
+	`).Scan(&endedAt)
+	if err == sql.ErrNoRows {
+		return time.Time{}, nil
+	}
+	if err != nil {
+		return time.Time{}, fmt.Errorf("failed to get last session: %w", err)
+	}
+	return endedAt.Time, nil
+}
+
 // StartSession records a new session.
 func (s *Store) StartSession() (int64, error) {
 	result, err := s.db.Exec(`INSERT INTO sessions (started_at) VALUES (?)`, time.Now())

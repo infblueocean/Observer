@@ -1,3 +1,5 @@
+//go:build ignore
+
 // Package controllers provides built-in controller implementations.
 package controllers
 
