@@ -2,6 +2,7 @@ package brain
 
 import (
 	"encoding/json"
+	"net/http"
 	"os"
 	"strings"
 )
@@ -84,15 +85,54 @@ func OllamaConfig() *ProviderConfig {
 	if endpoint == "" {
 		endpoint = "http://localhost:11434"
 	}
+
+	// Auto-detect model if not specified
+	model := os.Getenv("OLLAMA_MODEL")
+	if model == "" {
+		model = detectOllamaModel(endpoint)
+	}
+
 	return &ProviderConfig{
 		Name:            "ollama",
 		Endpoint:        endpoint + "/api/generate",
-		Model:           getEnvOr("OLLAMA_MODEL", "llama3.2"),
+		Model:           model,
 		AuthHeader:      "", // No auth needed
 		BuildBody:       buildOllamaBody,
 		ParseResponse:   parseOllamaResponse,
 		ParseStreamLine: parseOllamaStream,
 	}
+}
+
+// detectOllamaModel queries Ollama for available models and picks one
+func detectOllamaModel(endpoint string) string {
+	resp, err := http.Get(endpoint + "/api/tags")
+	if err != nil {
+		return "" // Will mark provider as unavailable
+	}
+	defer resp.Body.Close()
+
+	var tags struct {
+		Models []struct {
+			Name string `json:"name"`
+		} `json:"models"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&tags); err != nil {
+		return ""
+	}
+
+	if len(tags.Models) == 0 {
+		return ""
+	}
+
+	// Prefer instruct models for better chat/analysis
+	for _, m := range tags.Models {
+		if strings.Contains(strings.ToLower(m.Name), "instruct") {
+			return m.Name
+		}
+	}
+
+	// Fall back to first available model
+	return tags.Models[0].Name
 }
 
 // Body builders
