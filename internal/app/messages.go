@@ -16,6 +16,11 @@ type ItemsLoadedMsg struct {
 	Err        error
 }
 
+// ItemsPersistedMsg is sent when items have been saved to DB and processed
+type ItemsPersistedMsg struct {
+	Count int
+}
+
 // RefreshMsg triggers a feed refresh
 type RefreshMsg struct{}
 

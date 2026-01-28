@@ -448,43 +448,50 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.lastErrorTime = time.Now() // Reset 10s timer
 		} else {
 			logging.Debug("Feed fetched", "source", msg.SourceName, "items", len(msg.Items), "category", msg.Category)
-			// Track categories for coloring
+			// Track categories for coloring (fast, in-memory)
 			for _, item := range msg.Items {
 				m.itemCategories[item.ID] = msg.Category
 			}
 
-			// Merge new items into aggregator (for backward compat)
+			// Update aggregator state first (fast)
+			m.aggregator.UpdateSourceState(msg.SourceName, len(msg.Items), msg.Err)
+
+			// Merge into aggregator (fast, in-memory)
 			m.aggregator.MergeItems(msg.Items)
 
-			// Add to QueueManager (new sampling architecture)
+			// Add to QueueManager (fast, in-memory)
 			m.queueManager.AddItems(msg.SourceName, msg.Items)
 			m.queueManager.MarkPolled(msg.SourceName)
 
-			// Save to store
-			if m.store != nil {
-				m.store.SaveItems(msg.Items)
-			}
-
-			// Process items through correlation engine
-			// Note: This is synchronous but ProcessItems is fast for small batches
-			// TODO: Add background worker queue for large batches
-			if m.correlationEngine != nil && len(msg.Items) <= 20 {
-				m.correlationEngine.ProcessItems(msg.Items)
-			}
-
-			// Update aggregator state
-			m.aggregator.UpdateSourceState(msg.SourceName, len(msg.Items), msg.Err)
-
-			// Refresh stream view (with correlation data)
+			// Refresh stream view immediately so UI is responsive
 			m.updateStreamItems()
 
-			// Track feeds loaded and trigger top stories after enough feeds loaded
+			// Track feeds loaded
 			m.feedsLoadedCount++
+
+			// Do heavy I/O work asynchronously
+			items := msg.Items
+			store := m.store
+			engine := m.correlationEngine
+			cmd := func() tea.Msg {
+				// Save to store (DB I/O - can be slow)
+				if store != nil {
+					store.SaveItems(items)
+				}
+				// Process through correlation engine
+				if engine != nil && len(items) <= 50 {
+					engine.ProcessItems(items)
+				}
+				return ItemsPersistedMsg{Count: len(items)}
+			}
+
+			// Check if we should trigger top stories
 			if !m.topStoriesAnalyzed && m.feedsLoadedCount >= 5 && m.aggregator.ItemCount() >= 20 {
 				m.topStoriesAnalyzed = true
 				m.stream.SetTopStoriesLoading(true)
-				return m, tea.Batch(m.analyzeTopStories(), m.stream.Spinner().Tick)
+				return m, tea.Batch(cmd, m.analyzeTopStories(), m.stream.Spinner().Tick)
 			}
+			return m, cmd
 		}
 		return m, nil
 
@@ -503,6 +510,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		// Re-subscribe to get next event
 		return m, m.subscribeCorrelation()
+
+	case ItemsPersistedMsg:
+		// Items have been saved to DB and processed - no action needed
+		// This just acknowledges the async work completed
+		logging.Debug("Items persisted", "count", msg.Count)
 
 	case TickMsg:
 		// Clear error pane after 10 seconds of no new errors
