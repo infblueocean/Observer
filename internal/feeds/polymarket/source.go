@@ -16,19 +16,19 @@ const (
 
 // Market represents a Polymarket prediction market
 type Market struct {
-	ID                 string    `json:"id"`
-	Question           string    `json:"question"`
-	Description        string    `json:"description"`
-	Slug               string    `json:"slug"`
-	Active             bool      `json:"active"`
-	Closed             bool      `json:"closed"`
-	Volume             float64   `json:"volume"`
-	Volume24hr         float64   `json:"volume24hr"`
-	OutcomePrices      string    `json:"outcomePrices"` // JSON string "[0.65, 0.35]"
-	Outcomes           string    `json:"outcomes"`       // JSON string "[\"Yes\", \"No\"]"
-	CreatedAt          time.Time `json:"createdAt"`
-	EndDate            time.Time `json:"endDate"`
-	Category           string    `json:"category"`
+	ID                 string      `json:"id"`
+	Question           string      `json:"question"`
+	Description        string      `json:"description"`
+	Slug               string      `json:"slug"`
+	Active             bool        `json:"active"`
+	Closed             bool        `json:"closed"`
+	Volume             json.Number `json:"volume"`      // API returns string or number
+	Volume24hr         json.Number `json:"volume24hr"`  // API returns string or number
+	OutcomePrices      string      `json:"outcomePrices"` // JSON string "[0.65, 0.35]"
+	Outcomes           string      `json:"outcomes"`       // JSON string "[\"Yes\", \"No\"]"
+	CreatedAt          time.Time   `json:"createdAt"`
+	EndDate            time.Time   `json:"endDate"`
+	Category           string      `json:"category"`
 	Liquidity          json.Number `json:"liquidity"` // API returns string or number
 }
 
@@ -80,7 +80,9 @@ func (s *Source) Fetch() ([]feeds.Item, error) {
 
 	// Sort by 24h volume
 	sort.Slice(markets, func(i, j int) bool {
-		return markets[i].Volume24hr > markets[j].Volume24hr
+		vi, _ := markets[i].Volume24hr.Float64()
+		vj, _ := markets[j].Volume24hr.Float64()
+		return vi > vj
 	})
 
 	items := make([]feeds.Item, 0, len(markets))
@@ -96,8 +98,9 @@ func (s *Source) Fetch() ([]feeds.Item, error) {
 
 		// Format summary with probability and volume
 		summary := fmt.Sprintf("%.0f%% YES", prob*100)
-		if m.Volume24hr > 0 {
-			summary += fmt.Sprintf(" · $%.0fK 24h volume", m.Volume24hr/1000)
+		vol24hr, _ := m.Volume24hr.Float64()
+		if vol24hr > 0 {
+			summary += fmt.Sprintf(" · $%.0fK 24h volume", vol24hr/1000)
 		}
 		if m.Description != "" {
 			desc := m.Description
