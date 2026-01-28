@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/abelbrown/observer/internal/feeds"
+	"github.com/abelbrown/observer/internal/httpclient"
 )
 
 const (
@@ -42,9 +43,7 @@ func New(name, endpoint string) *Source {
 	return &Source{
 		name:     name,
 		endpoint: endpoint,
-		client: &http.Client{
-			Timeout: 30 * time.Second,
-		},
+		client:   httpclient.Default(),
 	}
 }
 

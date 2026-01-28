@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/abelbrown/observer/internal/httpclient"
 	"github.com/abelbrown/observer/internal/logging"
 )
 
@@ -35,8 +36,8 @@ func NewOllamaReranker(endpoint, model string) *OllamaReranker {
 	r := &OllamaReranker{
 		endpoint:    endpoint,
 		model:       model,
-		client:      &http.Client{Timeout: 30 * time.Second}, // Per-request timeout
-		concurrency: 32,                                      // Parallel requests - Ollama batches on GPU
+		client:      httpclient.Default(), // Shared client with connection pooling
+		concurrency: 32,                   // Parallel requests - Ollama batches on GPU
 	}
 
 	// Auto-detect model if not specified

@@ -22,9 +22,40 @@ func New(dbPath string) (*Store, error) {
 		return nil, err
 	}
 
+	// SQLite connection pool limits
+	// Allow multiple readers with WAL mode (single writer is handled by SQLite internally)
+	db.SetMaxOpenConns(4)
+	db.SetMaxIdleConns(2)
+
+	// Enable WAL mode and verify it was set
+	var journalMode string
+	if err := db.QueryRow("PRAGMA journal_mode=WAL").Scan(&journalMode); err != nil {
+		logging.Error("Failed to set WAL mode", "error", err)
+		db.Close()
+		return nil, err
+	}
+	if journalMode != "wal" {
+		logging.Warn("WAL mode not enabled", "actual_mode", journalMode)
+	}
+
+	// Apply other SQLite PRAGMA settings for concurrent access and durability
+	pragmas := []string{
+		"PRAGMA busy_timeout=5000",     // Wait 5s when database is locked
+		"PRAGMA synchronous=NORMAL",    // Balance between safety and performance
+		"PRAGMA foreign_keys=ON",       // Enable foreign key constraints
+	}
+	for _, pragma := range pragmas {
+		if _, err := db.Exec(pragma); err != nil {
+			logging.Error("Failed to set PRAGMA", "pragma", pragma, "error", err)
+			db.Close()
+			return nil, err
+		}
+	}
+
 	s := &Store{db: db}
 	if err := s.migrate(); err != nil {
 		logging.Error("Failed to migrate database", "error", err)
+		db.Close()
 		return nil, err
 	}
 
@@ -178,6 +209,7 @@ func (s *Store) SaveItems(items []feeds.Item) (int, error) {
 			item.Fetched,
 		)
 		if err != nil {
+			logging.Warn("Failed to save item", "error", err)
 			continue
 		}
 		rows, _ := result.RowsAffected()
@@ -227,10 +259,15 @@ func (s *Store) GetItems(limit int, includeRead bool) ([]feeds.Item, error) {
 			&item.Saved,
 		)
 		if err != nil {
+			logging.Warn("Failed to scan row", "error", err)
 			continue
 		}
 		item.Source = feeds.SourceType(sourceType)
 		items = append(items, item)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 
 	return items, nil
@@ -396,11 +433,17 @@ func (s *Store) GetAllAnalysesForItem(itemID string) ([]AnalysisRecord, error) {
 			&record.CreatedAt,
 		)
 		if err != nil {
+			logging.Warn("Failed to scan row", "error", err)
 			continue
 		}
 		record.Error = errMsg.String
 		records = append(records, record)
 	}
+
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
 	return records, nil
 }
 
@@ -490,6 +533,7 @@ func (s *Store) LoadTopStoriesCache() ([]TopStoryCacheEntry, error) {
 		var title, label, reason, zinger sql.NullString
 		err := rows.Scan(&e.ItemID, &title, &label, &reason, &zinger, &e.FirstSeen, &e.LastSeen, &e.HitCount, &e.MissCount)
 		if err != nil {
+			logging.Warn("Failed to scan row", "error", err)
 			continue
 		}
 		e.Title = title.String
@@ -497,6 +541,10 @@ func (s *Store) LoadTopStoriesCache() ([]TopStoryCacheEntry, error) {
 		e.Reason = reason.String
 		e.Zinger = zinger.String
 		entries = append(entries, e)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 
 	logging.Debug("Top stories cache loaded", "count", len(entries))

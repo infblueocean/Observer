@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/abelbrown/observer/internal/feeds"
+	"github.com/abelbrown/observer/internal/httpclient"
 )
 
 const (
@@ -44,10 +45,8 @@ type Source struct {
 // New creates a new Polymarket source
 func New() *Source {
 	return &Source{
-		name: "Polymarket",
-		client: &http.Client{
-			Timeout: 30 * time.Second,
-		},
+		name:   "Polymarket",
+		client: httpclient.Default(),
 	}
 }
 

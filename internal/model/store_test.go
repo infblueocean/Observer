@@ -285,6 +285,198 @@ func TestSession(t *testing.T) {
 	}
 }
 
+func TestSaveAndGetEmbedding(t *testing.T) {
+	store := newTestStore(t)
+	defer store.Close()
+
+	// Create and save an item
+	item := Item{
+		ID:         "item1",
+		Source:     SourceRSS,
+		SourceName: "Test",
+		Title:      "Test Article",
+		Published:  time.Now(),
+		Fetched:    time.Now(),
+	}
+	if _, err := store.SaveItems([]Item{item}); err != nil {
+		t.Fatalf("SaveItems failed: %v", err)
+	}
+
+	// Save embedding
+	embedding := []float32{0.1, 0.2, 0.3, 0.4, 0.5}
+	if err := store.SaveEmbedding("item1", embedding); err != nil {
+		t.Fatalf("SaveEmbedding failed: %v", err)
+	}
+
+	// Get embedding back
+	retrieved, err := store.GetEmbedding("item1")
+	if err != nil {
+		t.Fatalf("GetEmbedding failed: %v", err)
+	}
+	if len(retrieved) != len(embedding) {
+		t.Fatalf("expected %d floats, got %d", len(embedding), len(retrieved))
+	}
+	for i, v := range embedding {
+		if retrieved[i] != v {
+			t.Errorf("embedding[%d] = %f, expected %f", i, retrieved[i], v)
+		}
+	}
+}
+
+func TestSaveEmbeddings(t *testing.T) {
+	store := newTestStore(t)
+	defer store.Close()
+
+	// Create and save items
+	items := []Item{
+		{ID: "1", Source: SourceRSS, SourceName: "Test", Title: "A", Published: time.Now(), Fetched: time.Now()},
+		{ID: "2", Source: SourceRSS, SourceName: "Test", Title: "B", Published: time.Now(), Fetched: time.Now()},
+		{ID: "3", Source: SourceRSS, SourceName: "Test", Title: "C", Published: time.Now(), Fetched: time.Now()},
+	}
+	if _, err := store.SaveItems(items); err != nil {
+		t.Fatalf("SaveItems failed: %v", err)
+	}
+
+	// Save embeddings in batch
+	embeddings := map[string][]float32{
+		"1": {0.1, 0.2},
+		"2": {0.3, 0.4},
+		"3": {0.5, 0.6},
+	}
+	if err := store.SaveEmbeddings(embeddings); err != nil {
+		t.Fatalf("SaveEmbeddings failed: %v", err)
+	}
+
+	// Verify all embeddings saved
+	for id, expected := range embeddings {
+		retrieved, err := store.GetEmbedding(id)
+		if err != nil {
+			t.Fatalf("GetEmbedding(%s) failed: %v", id, err)
+		}
+		if len(retrieved) != len(expected) {
+			t.Errorf("embedding %s: expected %d floats, got %d", id, len(expected), len(retrieved))
+		}
+	}
+}
+
+func TestGetItemsWithoutEmbedding(t *testing.T) {
+	store := newTestStore(t)
+	defer store.Close()
+
+	// Create items
+	now := time.Now()
+	items := []Item{
+		{ID: "1", Source: SourceRSS, SourceName: "Test", Title: "A", Published: now, Fetched: now},
+		{ID: "2", Source: SourceRSS, SourceName: "Test", Title: "B", Published: now.Add(-time.Hour), Fetched: now},
+		{ID: "3", Source: SourceRSS, SourceName: "Test", Title: "C", Published: now.Add(-2 * time.Hour), Fetched: now},
+	}
+	if _, err := store.SaveItems(items); err != nil {
+		t.Fatalf("SaveItems failed: %v", err)
+	}
+
+	// Initially all items should be without embedding
+	noEmbed, err := store.GetItemsWithoutEmbedding(10)
+	if err != nil {
+		t.Fatalf("GetItemsWithoutEmbedding failed: %v", err)
+	}
+	if len(noEmbed) != 3 {
+		t.Errorf("expected 3 items without embedding, got %d", len(noEmbed))
+	}
+
+	// Save embedding for one item
+	if err := store.SaveEmbedding("2", []float32{0.1, 0.2}); err != nil {
+		t.Fatalf("SaveEmbedding failed: %v", err)
+	}
+
+	// Now should have 2 items without embedding
+	noEmbed, err = store.GetItemsWithoutEmbedding(10)
+	if err != nil {
+		t.Fatalf("GetItemsWithoutEmbedding failed: %v", err)
+	}
+	if len(noEmbed) != 2 {
+		t.Errorf("expected 2 items without embedding, got %d", len(noEmbed))
+	}
+
+	// Verify the count method too
+	count, err := store.GetItemsWithoutEmbeddingCount()
+	if err != nil {
+		t.Fatalf("GetItemsWithoutEmbeddingCount failed: %v", err)
+	}
+	if count != 2 {
+		t.Errorf("expected count 2, got %d", count)
+	}
+}
+
+func TestGetItemsWithEmbeddings(t *testing.T) {
+	store := newTestStore(t)
+	defer store.Close()
+
+	// Create items
+	now := time.Now()
+	items := []Item{
+		{ID: "1", Source: SourceRSS, SourceName: "Test", Title: "A", Published: now, Fetched: now},
+		{ID: "2", Source: SourceRSS, SourceName: "Test", Title: "B", Published: now.Add(-time.Hour), Fetched: now},
+	}
+	if _, err := store.SaveItems(items); err != nil {
+		t.Fatalf("SaveItems failed: %v", err)
+	}
+
+	// Save embeddings
+	embedding1 := []float32{0.1, 0.2, 0.3}
+	embedding2 := []float32{0.4, 0.5, 0.6}
+	if err := store.SaveEmbedding("1", embedding1); err != nil {
+		t.Fatalf("SaveEmbedding failed: %v", err)
+	}
+	if err := store.SaveEmbedding("2", embedding2); err != nil {
+		t.Fatalf("SaveEmbedding failed: %v", err)
+	}
+
+	// Get items with embeddings
+	retrieved, err := store.GetItemsWithEmbeddings(10, now.Add(-24*time.Hour))
+	if err != nil {
+		t.Fatalf("GetItemsWithEmbeddings failed: %v", err)
+	}
+	if len(retrieved) != 2 {
+		t.Fatalf("expected 2 items, got %d", len(retrieved))
+	}
+
+	// Verify embeddings are populated
+	for _, item := range retrieved {
+		if item.Embedding == nil {
+			t.Errorf("item %s has nil embedding", item.ID)
+		}
+		if len(item.Embedding) != 3 {
+			t.Errorf("item %s embedding has %d floats, expected 3", item.ID, len(item.Embedding))
+		}
+	}
+}
+
+func TestEmbeddingRoundTrip(t *testing.T) {
+	// Test that embedding serialization/deserialization preserves values
+	testCases := [][]float32{
+		{0.0, 1.0, -1.0},
+		{0.123456, 0.789012, 0.345678},
+		{1e-10, 1e10, -1e-10},
+		make([]float32, 1024), // Large embedding
+	}
+
+	for i, original := range testCases {
+		blob := serializeEmbedding(original)
+		restored := deserializeEmbedding(blob)
+
+		if len(restored) != len(original) {
+			t.Errorf("case %d: length mismatch %d vs %d", i, len(restored), len(original))
+			continue
+		}
+
+		for j, v := range original {
+			if restored[j] != v {
+				t.Errorf("case %d: value[%d] = %f, expected %f", i, j, restored[j], v)
+			}
+		}
+	}
+}
+
 // newTestStore creates a temporary store for testing.
 func newTestStore(t *testing.T) *Store {
 	t.Helper()

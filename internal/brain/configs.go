@@ -2,9 +2,10 @@ package brain
 
 import (
 	"encoding/json"
-	"net/http"
 	"os"
 	"strings"
+
+	"github.com/abelbrown/observer/internal/httpclient"
 )
 
 // Provider configurations
@@ -105,7 +106,7 @@ func OllamaConfig() *ProviderConfig {
 
 // detectOllamaModel queries Ollama for available models and picks one
 func detectOllamaModel(endpoint string) string {
-	resp, err := http.Get(endpoint + "/api/tags")
+	resp, err := httpclient.Default().Get(endpoint + "/api/tags")
 	if err != nil {
 		return "" // Will mark provider as unavailable
 	}

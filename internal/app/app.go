@@ -120,22 +120,40 @@ type Model struct {
 }
 
 // New creates a new app model
-func New() Model {
+func New() (Model, error) {
 	// Load configuration
-	cfg, _ := config.Load()
+	cfg, err := config.Load()
+	if err != nil {
+		if os.IsNotExist(err) {
+			logging.Info("No config found, creating defaults", "path", config.ConfigPath())
+			cfg = config.DefaultConfig()
+		} else if os.IsPermission(err) {
+			return Model{}, fmt.Errorf("cannot read config (permission denied): %s", config.ConfigPath())
+		} else {
+			// Assume JSON parse error or other corruption
+			return Model{}, fmt.Errorf("failed to load config: %w\nIf JSON is corrupted, delete %s", err, config.ConfigPath())
+		}
+	}
 
 	// Try to load keys from keys.sh if available
 	keysPath := filepath.Join(os.Getenv("HOME"), "src", "claude", "keys.sh")
 	if _, err := os.Stat(keysPath); err == nil {
-		cfg.LoadKeysFromFile(keysPath)
+		if err := cfg.LoadKeysFromFile(keysPath); err != nil {
+			logging.Warn("Failed to load keys from file", "path", keysPath, "error", err)
+		}
 	}
 	cfg.AutoPopulateFromEnv()
 	keyCount := cfg.ExportToEnvWithLogging(logging.Debug) // Make keys available to brain providers via os.Getenv()
 	logging.Info("API keys exported to environment", "count", keyCount)
-	cfg.Save()
+	if err := cfg.Save(); err != nil {
+		logging.Warn("Failed to save config", "error", err)
+	}
 
 	// Initialize store
-	homeDir, _ := os.UserHomeDir()
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return Model{}, fmt.Errorf("cannot determine home directory: %w", err)
+	}
 	dbPath := filepath.Join(homeDir, ".observer", "observer.db")
 	os.MkdirAll(filepath.Dir(dbPath), 0755)
 
@@ -381,7 +399,7 @@ func New() Model {
 		streamBuffer:        &strings.Builder{},
 		correlationCtx:      ctx,
 		correlationCancel:   cancel,
-	}
+	}, nil
 }
 
 // Init initializes the app
@@ -916,7 +934,9 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		} else {
 			m.config.UI.DensityMode = "comfortable"
 		}
-		m.config.Save()
+		if err := m.config.Save(); err != nil {
+			logging.Warn("Failed to save config", "error", err)
+		}
 
 	case "1":
 		// All items (no time selector)
@@ -1075,7 +1095,9 @@ func (m *Model) executeCommand(cmd string) (tea.Model, tea.Cmd) {
 		} else {
 			m.config.UI.DensityMode = "comfortable"
 		}
-		m.config.Save()
+		if err := m.config.Save(); err != nil {
+			logging.Warn("Failed to save config", "error", err)
+		}
 	case "analyze", "ai", "brain", "braintrust":
 		// Trigger AI analysis on selected item
 		if item := m.stream.SelectedItem(); item != nil {
@@ -1124,6 +1146,12 @@ func (m *Model) executeCommand(cmd string) (tea.Model, tea.Cmd) {
 
 // saveAndClose saves state and closes the store
 func (m *Model) saveAndClose() {
+	// Unsubscribe from work pool events before stopping
+	// This prevents the subscriber channel from leaking
+	if m.workPool != nil && m.workEventChan != nil {
+		m.workPool.Unsubscribe(m.workEventChan)
+	}
+
 	// Stop work pool
 	if m.workPool != nil {
 		m.workPool.Stop()
@@ -2288,8 +2316,8 @@ func (m Model) rerankTopStories() tea.Cmd {
 	if embedDedupRef != nil {
 		// Index items that don't have embeddings yet (runs inline for now)
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
 		embedDedupRef.IndexBatch(ctx, items)
-		cancel()
 
 		// Filter to primary items only
 		items = embedDedupRef.GetPrimaryItems(items)

@@ -12,6 +12,11 @@ import (
 	"github.com/abelbrown/observer/internal/logging"
 )
 
+// analysisSemaphore limits concurrent analysis goroutines to prevent resource exhaustion.
+// Capacity of 6 allows reasonable parallelism while avoiding overwhelming the system
+// or hitting API rate limits.
+var analysisSemaphore = make(chan struct{}, 6)
+
 // Analysis is the result of analyzing an item
 type Analysis struct {
 	Content  string
@@ -281,6 +286,28 @@ RULES:
 	// If cloud is available, use it directly
 	if cloudProvider != nil {
 		go func() {
+			// Acquire semaphore to limit concurrent analysis goroutines
+			// Use select to avoid blocking forever if context is cancelled
+			select {
+			case analysisSemaphore <- struct{}{}:
+				defer func() { <-analysisSemaphore }()
+			case <-ctx.Done():
+				logging.Debug("Cloud analysis cancelled while waiting for semaphore", "item", item.ID)
+				analysis := Analysis{
+					Error:    ctx.Err(),
+					Loading:  false,
+					Provider: cloudProvider.Name(),
+					Stage:    "cancelled",
+				}
+				a.mu.Lock()
+				a.analyses[item.ID] = &analysis
+				a.mu.Unlock()
+				for _, cb := range callbacks {
+					cb(item.ID, analysis)
+				}
+				return
+			}
+
 			// Recover from panics to prevent silent failures
 			defer func() {
 				if r := recover(); r != nil {
@@ -316,6 +343,28 @@ RULES:
 	} else if localProvider != nil {
 		// Two-stage local analysis: instruct model → transcript model
 		go func() {
+			// Acquire semaphore to limit concurrent analysis goroutines
+			// Use select to avoid blocking forever if context is cancelled
+			select {
+			case analysisSemaphore <- struct{}{}:
+				defer func() { <-analysisSemaphore }()
+			case <-ctx.Done():
+				logging.Debug("Local analysis cancelled while waiting for semaphore", "item", item.ID)
+				analysis := Analysis{
+					Error:    ctx.Err(),
+					Loading:  false,
+					Provider: "ollama",
+					Stage:    "cancelled",
+				}
+				a.mu.Lock()
+				a.analyses[item.ID] = &analysis
+				a.mu.Unlock()
+				for _, cb := range callbacks {
+					cb(item.ID, analysis)
+				}
+				return
+			}
+
 			// Recover from panics to prevent silent failures
 			defer func() {
 				if r := recover(); r != nil {
@@ -586,6 +635,28 @@ RULES:
 
 	// Run analysis in goroutine
 	go func() {
+		// Acquire semaphore to limit concurrent analysis goroutines
+		// Use select to avoid blocking forever if context is cancelled
+		select {
+		case analysisSemaphore <- struct{}{}:
+			defer func() { <-analysisSemaphore }()
+		case <-ctx.Done():
+			logging.Debug("Random provider analysis cancelled while waiting for semaphore", "item", item.ID)
+			analysis := Analysis{
+				Error:    ctx.Err(),
+				Loading:  false,
+				Provider: providerName,
+				Stage:    "cancelled",
+			}
+			a.mu.Lock()
+			a.analyses[item.ID] = &analysis
+			a.mu.Unlock()
+			for _, cb := range callbacks {
+				cb(item.ID, analysis)
+			}
+			return
+		}
+
 		// Recover from panics to prevent silent failures
 		defer func() {
 			if r := recover(); r != nil {
@@ -763,7 +834,18 @@ Output ONLY the pipe-separated lines. No other text. Remember: minimum 3 stories
 	results = a.updateTopStoriesCache(results, itemTitles)
 
 	// Generate zingers for stories that don't have one yet (async, local LLM only)
-	go a.generateZingersAsync(ctx, results, items)
+	go func() {
+		// Acquire semaphore to limit concurrent analysis goroutines
+		// Use select to avoid blocking forever if context is cancelled
+		select {
+		case analysisSemaphore <- struct{}{}:
+			defer func() { <-analysisSemaphore }()
+		case <-ctx.Done():
+			logging.Debug("Zinger generation cancelled while waiting for semaphore")
+			return
+		}
+		a.generateZingersAsync(ctx, results, items)
+	}()
 
 	logging.Info("Top stories identified", "count", len(results))
 	return results, nil

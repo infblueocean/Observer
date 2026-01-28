@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/abelbrown/observer/internal/feeds"
+	"github.com/abelbrown/observer/internal/httpclient"
 	"github.com/abelbrown/observer/internal/logging"
 	"github.com/mmcdole/gofeed"
 )
@@ -29,9 +30,7 @@ func New(name, url string) *Source {
 		name:   name,
 		url:    url,
 		parser: gofeed.NewParser(),
-		client: &http.Client{
-			Timeout: 30 * time.Second,
-		},
+		client: httpclient.Default(),
 	}
 }
 

@@ -128,18 +128,14 @@ func Load() (*Config, error) {
 
 	data, err := os.ReadFile(path)
 	if err != nil {
-		if os.IsNotExist(err) {
-			// Return defaults and try to auto-populate from environment
-			cfg := DefaultConfig()
-			cfg.AutoPopulateFromEnv()
-			return cfg, nil
-		}
+		// Return the error so caller can distinguish missing vs corrupted
 		return nil, err
 	}
 
 	var cfg Config
 	if err := json.Unmarshal(data, &cfg); err != nil {
-		return DefaultConfig(), nil
+		// Return error for corrupted JSON so caller can provide helpful message
+		return nil, err
 	}
 
 	// Migrate deprecated model names to current versions

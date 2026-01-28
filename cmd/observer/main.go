@@ -5,6 +5,7 @@ import (
 	"os"
 
 	"github.com/abelbrown/observer/internal/app"
+	"github.com/abelbrown/observer/internal/debug"
 	"github.com/abelbrown/observer/internal/logging"
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -16,8 +17,17 @@ func main() {
 	}
 	defer logging.Close()
 
+	// Start debug server for pprof and metrics
+	debug.StartDebugServer("localhost:6060")
+	defer debug.StopDebugServer()
+
 	// Create the app
-	m := app.New()
+	m, err := app.New()
+	if err != nil {
+		logging.Error("Failed to initialize application", "error", err)
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
 
 	// Run with alt screen and mouse support
 	p := tea.NewProgram(m,

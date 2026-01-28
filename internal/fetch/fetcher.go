@@ -47,6 +47,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/abelbrown/observer/internal/httpclient"
 	"github.com/abelbrown/observer/internal/model"
 	"github.com/mmcdole/gofeed"
 )
@@ -78,9 +79,7 @@ func NewRSSFetcher(name, url string) *RSSFetcher {
 		name:   name,
 		url:    url,
 		parser: gofeed.NewParser(),
-		client: &http.Client{
-			Timeout: 30 * time.Second,
-		},
+		client: httpclient.Default(),
 	}
 }
 

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/abelbrown/observer/internal/feeds"
+	"github.com/abelbrown/observer/internal/httpclient"
 )
 
 const (
@@ -68,33 +69,27 @@ type Source struct {
 // NewSignificant creates a source for significant earthquakes (past week)
 func NewSignificant() *Source {
 	return &Source{
-		name: "USGS Significant",
-		url:  significant,
-		client: &http.Client{
-			Timeout: 30 * time.Second,
-		},
+		name:   "USGS Significant",
+		url:    significant,
+		client: httpclient.Default(),
 	}
 }
 
 // NewM45Week creates a source for M4.5+ earthquakes (past week)
 func NewM45Week() *Source {
 	return &Source{
-		name: "USGS M4.5+",
-		url:  m45Week,
-		client: &http.Client{
-			Timeout: 30 * time.Second,
-		},
+		name:   "USGS M4.5+",
+		url:    m45Week,
+		client: httpclient.Default(),
 	}
 }
 
 // NewAllDay creates a source for all earthquakes in past day
 func NewAllDay() *Source {
 	return &Source{
-		name: "USGS Today",
-		url:  allDay,
-		client: &http.Client{
-			Timeout: 30 * time.Second,
-		},
+		name:   "USGS Today",
+		url:    allDay,
+		client: httpclient.Default(),
 	}
 }
 

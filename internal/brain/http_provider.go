@@ -9,8 +9,8 @@ import (
 	"io"
 	"net/http"
 	"strings"
-	"time"
 
+	"github.com/abelbrown/observer/internal/httpclient"
 	"github.com/abelbrown/observer/internal/logging"
 )
 
@@ -55,7 +55,7 @@ type HTTPProvider struct {
 func NewHTTPProvider(cfg *ProviderConfig) *HTTPProvider {
 	return &HTTPProvider{
 		config: cfg,
-		client: &http.Client{Timeout: 120 * time.Second},
+		client: httpclient.LongTimeout(), // Shared client with 2-minute timeout for LLM APIs
 	}
 }
 
@@ -142,9 +142,8 @@ func (p *HTTPProvider) GenerateStream(ctx context.Context, req Request) (<-chan 
 
 	p.setHeaders(httpReq)
 
-	// No timeout for streaming
-	client := &http.Client{}
-	resp, err := client.Do(httpReq)
+	// Use streaming client (no timeout) for SSE responses
+	resp, err := httpclient.Streaming().Do(httpReq)
 	if err != nil {
 		return nil, fmt.Errorf("request failed: %w", err)
 	}

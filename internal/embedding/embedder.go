@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/abelbrown/observer/internal/httpclient"
 	"github.com/abelbrown/observer/internal/logging"
 )
 
@@ -71,9 +72,7 @@ func NewOllamaEmbedder(endpoint, model string) *OllamaEmbedder {
 	e := &OllamaEmbedder{
 		endpoint: endpoint,
 		model:    model,
-		client: &http.Client{
-			Timeout: 30 * time.Second,
-		},
+		client:   httpclient.Default(),
 	}
 
 	// Check availability

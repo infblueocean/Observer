@@ -1,9 +1,11 @@
 package work
 
 import (
+	"container/heap"
 	"context"
 	"fmt"
 	"runtime"
+	"runtime/debug"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -18,30 +20,33 @@ type Pool struct {
 	workers int
 
 	// Queues
-	pending   []*Item           // Priority queue (higher priority first)
-	active    map[string]*Item  // ID -> active work
-	completed *RingBuffer       // Recent completed (success + failure)
+	pending      priorityQueue    // Heap-based priority queue (higher priority first)
+	pendingIndex map[string]*Item // ID -> pending item for O(1) lookup
+	active       map[string]*Item // ID -> active work
+	completed    *RingBuffer      // Recent completed (success + failure)
 
 	// Channels
-	workChan chan *Item
-	stopChan chan struct{}
+	workSignal chan struct{} // Signal-only channel to wake up pending processor
+	stopChan   chan struct{}
+	stopOnce   sync.Once // Protects against double-stop panic
 
 	// Event subscribers (for UI updates)
 	subscribers   []chan Event
 	subscribersMu sync.RWMutex
 
-	// Stats
+	// Stats (protected by mu, not atomic)
 	totalCreated   int64
 	totalCompleted int64
 	totalFailed    int64
 
-	// ID generator
+	// ID generator (atomic, no mutex needed)
 	nextID int64
 
 	// Lifecycle
-	ctx    context.Context
-	cancel context.CancelFunc
-	wg     sync.WaitGroup
+	started bool // Protected by mu, prevents double-start
+	ctx     context.Context
+	cancel  context.CancelFunc
+	wg      sync.WaitGroup
 }
 
 // NewPool creates a work pool with the specified number of workers.
@@ -51,28 +56,36 @@ func NewPool(workers int) *Pool {
 		workers = runtime.NumCPU()
 	}
 
-	return &Pool{
-		workers:   workers,
-		active:    make(map[string]*Item),
-		completed: NewRingBuffer(100),
-		workChan:  make(chan *Item, 1000),
-		stopChan:  make(chan struct{}),
+	p := &Pool{
+		workers:      workers,
+		pending:      make(priorityQueue, 0),
+		pendingIndex: make(map[string]*Item),
+		active:       make(map[string]*Item),
+		completed:    NewRingBuffer(100),
+		workSignal:   make(chan struct{}, 1), // Buffered signal channel (1 is enough)
+		stopChan:     make(chan struct{}),
 	}
+	heap.Init(&p.pending)
+	return p
 }
 
 // Start launches the worker goroutines.
+// Safe to call multiple times; subsequent calls are no-ops.
 func (p *Pool) Start(ctx context.Context) {
+	p.mu.Lock()
+	if p.started {
+		p.mu.Unlock()
+		logging.Debug("Work pool already started, ignoring Start() call")
+		return
+	}
+	p.started = true
+	p.mu.Unlock()
+
 	p.ctx, p.cancel = context.WithCancel(ctx)
 
 	logging.Info("Work pool starting", "workers", p.workers)
 
-	// Start workers
-	for i := 0; i < p.workers; i++ {
-		p.wg.Add(1)
-		go p.worker(i)
-	}
-
-	// Start pending queue processor
+	// Start pending queue processor (the only goroutine we need)
 	p.wg.Add(1)
 	go p.processPending()
 
@@ -80,58 +93,78 @@ func (p *Pool) Start(ctx context.Context) {
 }
 
 // Stop gracefully shuts down the pool.
+// Safe to call multiple times; subsequent calls are no-ops.
 func (p *Pool) Stop() {
-	logging.Info("Work pool stopping")
-	if p.cancel != nil {
-		p.cancel()
-	}
-	close(p.stopChan)
-	p.wg.Wait()
-	logging.Info("Work pool stopped",
-		"created", p.totalCreated,
-		"completed", p.totalCompleted,
-		"failed", p.totalFailed)
+	p.stopOnce.Do(func() {
+		logging.Info("Work pool stopping")
+		if p.cancel != nil {
+			p.cancel()
+		}
+		close(p.stopChan)
+		p.wg.Wait()
+		p.mu.RLock()
+		created := p.totalCreated
+		completed := p.totalCompleted
+		failed := p.totalFailed
+		p.mu.RUnlock()
+		logging.Info("Work pool stopped",
+			"created", created,
+			"completed", completed,
+			"failed", failed)
+	})
 }
 
 // Submit adds a work item to the queue.
+// The item's Priority field is used as-is (no defaulting).
+// Use SubmitFunc for the common case with automatic PriorityNormal.
 func (p *Pool) Submit(item *Item) string {
+	p.mu.Lock()
+	// Reject submissions after pool is stopped
+	if p.ctx != nil && p.ctx.Err() != nil {
+		p.mu.Unlock()
+		return "" // Pool is stopped, reject submission
+	}
+
 	item.ID = p.generateID()
 	item.Status = StatusPending
 	item.CreatedAt = time.Now()
 
-	p.mu.Lock()
-	p.pending = append(p.pending, item)
-	atomic.AddInt64(&p.totalCreated, 1)
+	heap.Push(&p.pending, item)
+	p.pendingIndex[item.ID] = item
+	p.totalCreated++
 	p.mu.Unlock()
 
-	p.notify(Event{Item: item, Change: "created"})
+	p.notify(Event{Item: copyItem(item), Change: "created"})
 
-	// Signal pending processor
+	// Signal pending processor (non-blocking)
 	select {
-	case p.workChan <- item:
+	case p.workSignal <- struct{}{}:
 	default:
-		// Channel full, item stays in pending queue
-		logging.Debug("Work channel full, item queued", "id", item.ID)
+		// Signal already pending, no need to send another
 	}
 
 	return item.ID
 }
 
 // SubmitFunc is a convenience for simple work without progress tracking.
+// Uses PriorityNormal by default.
 func (p *Pool) SubmitFunc(typ Type, desc string, fn func() (string, error)) string {
 	item := &Item{
 		Type:        typ,
 		Description: desc,
+		Priority:    PriorityNormal,
 		workFn:      fn,
 	}
 	return p.Submit(item)
 }
 
 // SubmitWithProgress submits work that reports progress.
+// Uses PriorityNormal by default.
 func (p *Pool) SubmitWithProgress(typ Type, desc string, fn func(progress func(pct float64, msg string)) (string, error)) string {
 	item := &Item{
 		Type:        typ,
 		Description: desc,
+		Priority:    PriorityNormal,
 	}
 
 	// Wrap the function to inject progress callback
@@ -140,8 +173,9 @@ func (p *Pool) SubmitWithProgress(typ Type, desc string, fn func(progress func(p
 			p.mu.Lock()
 			item.Progress = pct
 			item.ProgressMsg = msg
+			itemCopy := copyItem(item)
 			p.mu.Unlock()
-			p.notify(Event{Item: item, Change: "progress"})
+			p.notify(Event{Item: itemCopy, Change: "progress"})
 		})
 	}
 
@@ -150,18 +184,57 @@ func (p *Pool) SubmitWithProgress(typ Type, desc string, fn func(progress func(p
 
 // SubmitWithData submits work that returns arbitrary data.
 // The dataFn should return (result string, data any, error).
+// Uses PriorityNormal by default.
 func (p *Pool) SubmitWithData(typ Type, desc string, source string, category string, dataFn func() (string, any, error)) string {
 	item := &Item{
 		Type:        typ,
 		Description: desc,
 		Source:      source,
 		Category:    category,
+		Priority:    PriorityNormal,
 	}
 
 	// Wrap the function to capture data
 	item.workFn = func() (string, error) {
 		result, data, err := dataFn()
+		// Synchronize write to item.Data - Snapshot() reads this concurrently
+		p.mu.Lock()
 		item.Data = data
+		p.mu.Unlock()
+		return result, err
+	}
+
+	return p.Submit(item)
+}
+
+// SubmitFuncWithPriority submits simple work with a specific priority.
+func (p *Pool) SubmitFuncWithPriority(typ Type, desc string, priority int, fn func() (string, error)) string {
+	item := &Item{
+		Type:        typ,
+		Description: desc,
+		Priority:    priority,
+		workFn:      fn,
+	}
+	return p.Submit(item)
+}
+
+// SubmitWithDataAndPriority submits work with data and a specific priority.
+func (p *Pool) SubmitWithDataAndPriority(typ Type, desc string, source string, category string, priority int, dataFn func() (string, any, error)) string {
+	item := &Item{
+		Type:        typ,
+		Description: desc,
+		Source:      source,
+		Category:    category,
+		Priority:    priority,
+	}
+
+	// Wrap the function to capture data
+	item.workFn = func() (string, error) {
+		result, data, err := dataFn()
+		// Synchronize write to item.Data - Snapshot() reads this concurrently
+		p.mu.Lock()
+		item.Data = data
+		p.mu.Unlock()
 		return result, err
 	}
 
@@ -183,7 +256,7 @@ func (p *Pool) processPending() {
 			return
 		case <-ticker.C:
 			p.dispatchPending()
-		case <-p.workChan:
+		case <-p.workSignal:
 			// Signal received, try to dispatch
 			p.dispatchPending()
 		}
@@ -191,51 +264,46 @@ func (p *Pool) processPending() {
 }
 
 // dispatchPending sends pending items to workers if capacity available.
+// Uses heap.Pop for O(log n) extraction of highest priority item.
 func (p *Pool) dispatchPending() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	// Sort by priority (simple bubble sort, pending queue is small)
-	for i := 0; i < len(p.pending)-1; i++ {
-		for j := i + 1; j < len(p.pending); j++ {
-			if p.pending[j].Priority > p.pending[i].Priority {
-				p.pending[i], p.pending[j] = p.pending[j], p.pending[i]
-			}
-		}
-	}
-
 	// Dispatch items while we have worker capacity
-	for len(p.pending) > 0 && len(p.active) < p.workers {
-		item := p.pending[0]
-		p.pending = p.pending[1:]
+	for p.pending.Len() > 0 && len(p.active) < p.workers {
+		item := heap.Pop(&p.pending).(*Item)
+		delete(p.pendingIndex, item.ID)
 
 		item.Status = StatusActive
 		item.StartedAt = time.Now()
 		p.active[item.ID] = item
 
-		p.notify(Event{Item: item, Change: "started"})
+		logging.Debug("Dispatching work",
+			"id", item.ID,
+			"desc", item.Description,
+			"priority", item.Priority,
+			"pending_remaining", p.pending.Len())
 
-		// Execute in goroutine (worker pool is really more of a concurrency limiter)
+		p.notify(Event{Item: copyItem(item), Change: "started"})
+
+		// Execute in goroutine (concurrency is limited by active map size)
+		p.wg.Add(1)
 		go p.execute(item)
 	}
 }
 
-// worker processes work items.
-func (p *Pool) worker(id int) {
-	defer p.wg.Done()
-	logging.Debug("Worker started", "worker", id)
-
-	<-p.ctx.Done()
-	logging.Debug("Worker stopped", "worker", id)
-}
-
 // execute runs a single work item.
 func (p *Pool) execute(item *Item) {
+	defer p.wg.Done()
 	defer func() {
 		if r := recover(); r != nil {
+			stack := debug.Stack() // Auto-sizes, no truncation
 			logging.Error("Work panicked",
 				"id", item.ID,
-				"panic", r)
+				"type", item.Type,
+				"desc", item.Description,
+				"panic", r,
+				"stack", string(stack))
 			p.complete(item, "", fmt.Errorf("panic: %v", r))
 		}
 	}()
@@ -258,50 +326,87 @@ func (p *Pool) complete(item *Item, result string, err error) {
 
 	if err != nil {
 		item.Status = StatusFailed
-		atomic.AddInt64(&p.totalFailed, 1)
+		p.totalFailed++
 	} else {
 		item.Status = StatusComplete
-		atomic.AddInt64(&p.totalCompleted, 1)
+		p.totalCompleted++
 	}
 
 	delete(p.active, item.ID)
 	p.completed.Push(item)
+	itemCopy := copyItem(item)
 	p.mu.Unlock()
 
 	change := "completed"
 	if err != nil {
 		change = "failed"
 	}
-	p.notify(Event{Item: item, Change: change})
+	p.notify(Event{Item: itemCopy, Change: change})
 }
 
 // Snapshot returns the current state for UI display.
+// Returns deep copies of items to prevent data races.
 func (p *Pool) Snapshot() Snapshot {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 
-	// Copy pending
-	pending := make([]*Item, len(p.pending))
-	copy(pending, p.pending)
+	// Deep copy pending items
+	pending := make([]*Item, p.pending.Len())
+	for i, item := range p.pending {
+		pending[i] = copyItem(item)
+	}
 
-	// Copy active
+	// Deep copy active items
 	active := make([]*Item, 0, len(p.active))
 	for _, item := range p.active {
-		active = append(active, item)
+		active = append(active, copyItem(item))
+	}
+
+	// Deep copy completed items
+	completedRaw := p.completed.All()
+	completed := make([]*Item, len(completedRaw))
+	for i, item := range completedRaw {
+		completed[i] = copyItem(item)
 	}
 
 	return Snapshot{
 		Pending:   pending,
 		Active:    active,
-		Completed: p.completed.All(),
+		Completed: completed,
 		Stats: Stats{
-			TotalCreated:   atomic.LoadInt64(&p.totalCreated),
-			TotalCompleted: atomic.LoadInt64(&p.totalCompleted),
-			TotalFailed:    atomic.LoadInt64(&p.totalFailed),
+			TotalCreated:   p.totalCreated,
+			TotalCompleted: p.totalCompleted,
+			TotalFailed:    p.totalFailed,
 			WorkersActive:  len(p.active),
 			WorkersTotal:   p.workers,
 			PendingCount:   len(p.pending),
 		},
+	}
+}
+
+// copyItem creates a shallow copy of an Item (sufficient for UI display).
+// Does not copy workFn, progressFn, or heapIndex as they are internal.
+func copyItem(item *Item) *Item {
+	if item == nil {
+		return nil
+	}
+	return &Item{
+		ID:          item.ID,
+		Type:        item.Type,
+		Status:      item.Status,
+		Description: item.Description,
+		CreatedAt:   item.CreatedAt,
+		StartedAt:   item.StartedAt,
+		FinishedAt:  item.FinishedAt,
+		Progress:    item.Progress,
+		ProgressMsg: item.ProgressMsg,
+		Result:      item.Result,
+		Error:       item.Error,
+		Data:        item.Data, // Note: Data itself is not deep copied
+		Source:      item.Source,
+		Category:    item.Category,
+		Priority:    item.Priority,
+		// heapIndex intentionally not copied - internal heap state, concurrent access unsafe
 	}
 }
 
@@ -363,12 +468,12 @@ func (p *Pool) Stats() Stats {
 	defer p.mu.RUnlock()
 
 	return Stats{
-		TotalCreated:   atomic.LoadInt64(&p.totalCreated),
-		TotalCompleted: atomic.LoadInt64(&p.totalCompleted),
-		TotalFailed:    atomic.LoadInt64(&p.totalFailed),
+		TotalCreated:   p.totalCreated,
+		TotalCompleted: p.totalCompleted,
+		TotalFailed:    p.totalFailed,
 		WorkersActive:  len(p.active),
 		WorkersTotal:   p.workers,
-		PendingCount:   len(p.pending),
+		PendingCount:   p.pending.Len(),
 	}
 }
 
@@ -376,7 +481,7 @@ func (p *Pool) Stats() Stats {
 func (p *Pool) PendingCount() int {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
-	return len(p.pending)
+	return p.pending.Len()
 }
 
 // ActiveCount returns the number of active items.
@@ -390,5 +495,24 @@ func (p *Pool) ActiveCount() int {
 func (p *Pool) ClearHistory() {
 	p.completed.Clear()
 	logging.Info("Work history cleared")
+}
+
+// UpdatePriority changes the priority of a pending work item.
+// Returns false if the item is not found or not pending.
+// Uses O(1) lookup via pendingIndex.
+func (p *Pool) UpdatePriority(id string, priority int) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	item, ok := p.pendingIndex[id]
+	if !ok {
+		return false
+	}
+
+	if p.pending.update(item, priority) {
+		logging.Debug("Work priority updated", "id", id, "priority", priority)
+		return true
+	}
+	return false
 }
 

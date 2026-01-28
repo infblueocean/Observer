@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/abelbrown/observer/internal/feeds"
+	"github.com/abelbrown/observer/internal/httpclient"
 )
 
 const (
@@ -47,10 +48,8 @@ type Source struct {
 // New creates a new Manifold source
 func New() *Source {
 	return &Source{
-		name: "Manifold",
-		client: &http.Client{
-			Timeout: 30 * time.Second,
-		},
+		name:   "Manifold",
+		client: httpclient.Default(),
 	}
 }
 

@@ -1,6 +1,19 @@
 // Package work provides a unified system for async work processing.
+//
 // All async operations (fetching, dedup, reranking, analysis) flow through
 // a central work pool, making the system observable and debuggable.
+//
+// # Priority System
+//
+// Work items have a Priority field that controls execution order. Higher priority
+// items are executed before lower priority items. Use the predefined constants:
+//
+//	PriorityBackground - Batch operations (embeds, cleanup)
+//	PriorityLow        - Deferred work
+//	PriorityNormal     - Standard operations (default)
+//	PriorityHigh       - Important operations (breaking news)
+//	PriorityUrgent     - User-initiated actions
+//	PriorityCritical   - System-critical operations
 //
 // Press /w to see the work queue in action.
 //
@@ -15,6 +28,17 @@ import (
 	"github.com/abelbrown/observer/internal/logging"
 )
 
+// Priority levels for work items.
+// Higher values = more urgent, executed first.
+const (
+	PriorityBackground = -10 // Batch work: embeds, dedup, cleanup
+	PriorityLow        = 0   // Deferred: non-urgent background tasks
+	PriorityNormal     = 10  // Standard: scheduled fetches (default)
+	PriorityHigh       = 50  // Important: breaking news sources
+	PriorityUrgent     = 100 // User-initiated: manual refresh, analysis
+	PriorityCritical   = 200 // System-critical: shutdown tasks
+)
+
 // LogEvent logs a work event for debugging.
 func LogEvent(event Event) {
 	item := event.Item
@@ -23,6 +47,7 @@ func LogEvent(event Event) {
 		logging.Info("Work created",
 			"id", item.ID,
 			"type", item.Type,
+			"priority", item.Priority,
 			"desc", item.Description)
 	case "started":
 		logging.Info("Work started",
@@ -56,11 +81,12 @@ type Type string
 
 const (
 	TypeFetch   Type = "fetch"   // Fetching RSS/API sources
-	TypeDedup   Type = "dedup"   // SimHash duplicate detection
+	TypeDedup   Type = "dedup"   // Duplicate detection
 	TypeEmbed   Type = "embed"   // Embedding generation
 	TypeRerank  Type = "rerank"  // ML reranking
 	TypeFilter  Type = "filter"  // Pattern/semantic filtering
 	TypeAnalyze Type = "analyze" // AI analysis
+	TypeIntake  Type = "intake"  // Intake pipeline processing
 	TypeOther   Type = "other"   // Catch-all
 )
 
@@ -79,6 +105,8 @@ func (t Type) Icon() string {
 		return "◌"
 	case TypeAnalyze:
 		return "◉"
+	case TypeIntake:
+		return "⇒"
 	default:
 		return "○"
 	}
@@ -113,18 +141,21 @@ type Item struct {
 	// Result
 	Result string // "12 new items", "blocked 3"
 	Error  error
-	Data   any    // Arbitrary result data (e.g., []feeds.Item for fetch)
+	Data   any // Arbitrary result data (e.g., []feeds.Item for fetch)
 
 	// Context
 	Source   string // Source name, item ID, or other context
 	Category string // Category for filtering (e.g., feed category)
-	Priority int    // Higher = more urgent (default 0)
+	Priority int    // Higher = more urgent (default PriorityNormal)
 
 	// Internal: the work function to execute
 	workFn func() (string, error)
 
 	// Internal: progress callback for long-running work
 	progressFn func(pct float64, msg string)
+
+	// Internal: heap index for priority queue
+	heapIndex int
 }
 
 // Duration returns how long the work took (or has been running).
@@ -159,6 +190,24 @@ func (i *Item) StatusIcon() string {
 		return "✗"
 	default:
 		return "?"
+	}
+}
+
+// PriorityName returns a human-readable name for the priority level.
+func (i *Item) PriorityName() string {
+	switch {
+	case i.Priority >= PriorityCritical:
+		return "critical"
+	case i.Priority >= PriorityUrgent:
+		return "urgent"
+	case i.Priority >= PriorityHigh:
+		return "high"
+	case i.Priority >= PriorityNormal:
+		return "normal"
+	case i.Priority >= PriorityLow:
+		return "low"
+	default:
+		return "background"
 	}
 }
 
