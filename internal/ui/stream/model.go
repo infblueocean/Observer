@@ -118,6 +118,32 @@ func interleaveBySource(items []feeds.Item, maxPerSource int) []feeds.Item {
 	return result
 }
 
+// allocateByBand distributes items across time bands with slot limits.
+// This ensures each time period gets fair representation.
+// Eventually a ranker will score items and pick the best N for each band.
+func allocateByBand(items []feeds.Item, slots map[timeBand]int) []feeds.Item {
+	// Group items by time band
+	byBand := make(map[timeBand][]feeds.Item)
+	for _, item := range items {
+		band := getTimeBand(item.Published)
+		byBand[band] = append(byBand[band], item)
+	}
+
+	// Take up to N items from each band (in order: JustNow, PastHour, Today, Yesterday, Older)
+	var result []feeds.Item
+	bands := []timeBand{bandJustNow, bandPastHour, bandToday, bandYesterday, bandOlder}
+	for _, band := range bands {
+		bandItems := byBand[band]
+		limit := slots[band]
+		if len(bandItems) > limit {
+			bandItems = bandItems[:limit]
+		}
+		result = append(result, bandItems...)
+	}
+
+	return result
+}
+
 // sourceActivity tracks recent activity for a source
 type sourceActivity struct {
 	recentCount int       // items in last hour
@@ -164,6 +190,50 @@ func renderActivityIndicator(recentCount int) string {
 		return "▁▁▁" // Low
 	default:
 		return "···" // Inactive
+	}
+}
+
+// timeBand categorizes items by age for visual grouping
+type timeBand int
+
+const (
+	bandJustNow timeBand = iota
+	bandPastHour
+	bandToday
+	bandYesterday
+	bandOlder
+)
+
+// getTimeBand determines which time band an item belongs to
+func getTimeBand(published time.Time) timeBand {
+	age := time.Since(published)
+	switch {
+	case age < 15*time.Minute:
+		return bandJustNow
+	case age < time.Hour:
+		return bandPastHour
+	case age < 24*time.Hour:
+		return bandToday
+	case age < 48*time.Hour:
+		return bandYesterday
+	default:
+		return bandOlder
+	}
+}
+
+// bandLabel returns the display name for a time band
+func bandLabel(band timeBand) string {
+	switch band {
+	case bandJustNow:
+		return "Just Now"
+	case bandPastHour:
+		return "Past Hour"
+	case bandToday:
+		return "Earlier Today"
+	case bandYesterday:
+		return "Yesterday"
+	default:
+		return "Older"
 	}
 }
 
@@ -535,11 +605,20 @@ func (m Model) FilterLabel() string {
 	return m.filterLabel
 }
 
-// getFilteredItems returns items matching the current filter
+// Slot limits per time band (how many items to show in each section)
+var bandSlots = map[timeBand]int{
+	bandJustNow:   10,
+	bandPastHour:  20,
+	bandToday:     15,
+	bandYesterday: 10,
+	bandOlder:     5,
+}
+
+// getFilteredItems returns items matching the current filter with slot-based allocation
 func (m Model) getFilteredItems() []feeds.Item {
 	items := m.items
 
-	// Apply time/source selector first
+	// Apply time/source selector first (if user pressed 1-5 keys)
 	if m.activeSelector != nil {
 		items = selection.Apply(items, m.activeSelector)
 	}
@@ -566,6 +645,12 @@ func (m Model) getFilteredItems() []feeds.Item {
 			}
 		}
 		items = filtered
+	}
+
+	// Apply slot-based allocation per time band (unless a selector is active)
+	// When selector is active, user wants to see ALL items in that time range
+	if m.activeSelector == nil && !m.HasFilter() {
+		items = allocateByBand(items, bandSlots)
 	}
 
 	return items
@@ -921,7 +1006,26 @@ func (m Model) renderItemsOnly(headerHeight int) string {
 	}
 	var allBlocks []renderedBlock
 
+	// Style for time band dividers
+	dividerStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#6e7681")).
+		Italic(true)
+
+	var currentBand timeBand = -1 // Invalid initial value
+
 	for i, item := range items {
+		// Check if we need a time band divider (only in comfortable mode)
+		if m.density == DensityComfortable {
+			itemBand := getTimeBand(item.Published)
+			if itemBand != currentBand {
+				currentBand = itemBand
+				// Add divider with band label
+				label := bandLabel(itemBand)
+				dividerLine := dividerStyle.Render(fmt.Sprintf("  ─── %s ───", label))
+				allBlocks = append(allBlocks, renderedBlock{[]string{"", dividerLine}, -1})
+			}
+		}
+
 		// In compact mode, skip rendering read items fully - just show minimal
 		if m.density == DensityCompact && item.Read && i != m.cursor {
 			// Ultra-minimal read item
