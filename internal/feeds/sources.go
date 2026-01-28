@@ -35,7 +35,6 @@ var DefaultRSSFeeds = []RSSFeedConfig{
 	{Name: "Washington Post", URL: "http://feeds.washingtonpost.com/rss/world", Category: "newspaper-us", RefreshMinutes: RefreshLazy, Weight: 1.2},
 	{Name: "LA Times", URL: "https://www.latimes.com/world-nation/rss2.0.xml", Category: "newspaper-us", RefreshMinutes: RefreshLazy, Weight: 1.0},
 	{Name: "Wall St Journal", URL: "https://feeds.a.dj.com/rss/RSSWorldNews.xml", Category: "newspaper-us", RefreshMinutes: RefreshLazy, Weight: 1.2},
-	// {Name: "USA Today", URL: "http://rssfeeds.usatoday.com/usatoday-NewsTopStories", Category: "newspaper-us", RefreshMinutes: RefreshLazy, Weight: 0.9}, // DISABLED: Feed parse failure
 
 	// ============================================
 	// NEWSPAPERS - INTERNATIONAL
@@ -44,7 +43,6 @@ var DefaultRSSFeeds = []RSSFeedConfig{
 	{Name: "Guardian US", URL: "https://www.theguardian.com/us-news/rss", Category: "newspaper-intl", RefreshMinutes: RefreshLazy, Weight: 1.1},
 	{Name: "The Telegraph", URL: "https://www.telegraph.co.uk/rss.xml", Category: "newspaper-intl", RefreshMinutes: RefreshLazy, Weight: 1.0},
 	{Name: "Der Spiegel", URL: "https://www.spiegel.de/international/index.rss", Category: "newspaper-intl", RefreshMinutes: RefreshLazy, Weight: 1.1},
-	// {Name: "France 24", URL: "https://www.france24.com/en/rss", Category: "newspaper-intl", RefreshMinutes: RefreshLazy, Weight: 1.0}, // DISABLED: Feed parse failure
 	{Name: "DW News", URL: "https://rss.dw.com/rdf/rss-en-all", Category: "newspaper-intl", RefreshMinutes: RefreshLazy, Weight: 1.0},
 	{Name: "Japan Times", URL: "https://www.japantimes.co.jp/feed/", Category: "newspaper-intl", RefreshMinutes: RefreshHourly, Weight: 1.0},
 	{Name: "South China MP", URL: "https://www.scmp.com/rss/91/feed", Category: "newspaper-intl", RefreshMinutes: RefreshLazy, Weight: 1.1},
@@ -133,7 +131,6 @@ var DefaultRSSFeeds = []RSSFeedConfig{
 	{Name: "Wired", URL: "https://www.wired.com/feed/rss", Category: "tech", RefreshMinutes: RefreshSlow, Weight: 1.1},
 	{Name: "TechCrunch", URL: "https://techcrunch.com/feed/", Category: "tech", RefreshMinutes: RefreshSlow, Weight: 1.0},
 	{Name: "Engadget", URL: "https://www.engadget.com/rss.xml", Category: "tech", RefreshMinutes: RefreshSlow, Weight: 0.9},
-	// {Name: "AnandTech", URL: "https://www.anandtech.com/rss/", Category: "tech", RefreshMinutes: RefreshHourly, Weight: 1.1}, // DISABLED: Site defunct
 	{Name: "Slashdot", URL: "http://rss.slashdot.org/Slashdot/slashdotMain", Category: "tech", RefreshMinutes: RefreshSlow, Weight: 1.0},
 	{Name: "dev.to", URL: "https://dev.to/feed", Category: "tech", RefreshMinutes: RefreshSlow, Weight: 0.8},
 	{Name: "HackerNoon", URL: "https://hackernoon.com/feed", Category: "tech", RefreshMinutes: RefreshLazy, Weight: 0.8},
@@ -141,11 +138,8 @@ var DefaultRSSFeeds = []RSSFeedConfig{
 	// ============================================
 	// AI & ML SPECIFIC (High signal, less frequent)
 	// ============================================
-	// {Name: "OpenAI Blog", URL: "https://openai.com/blog/rss/", Category: "ai", RefreshMinutes: RefreshHourly, Weight: 1.5}, // DISABLED: 403 Forbidden
-	// {Name: "Anthropic News", URL: "https://www.anthropic.com/rss.xml", Category: "ai", RefreshMinutes: RefreshHourly, Weight: 1.5}, // DISABLED: 404 Not Found
 	{Name: "Google AI Blog", URL: "https://blog.google/technology/ai/rss/", Category: "ai", RefreshMinutes: RefreshHourly, Weight: 1.3},
 	{Name: "DeepMind Blog", URL: "https://deepmind.com/blog/feed/basic/", Category: "ai", RefreshMinutes: RefreshHourly, Weight: 1.3},
-	// {Name: "MIT AI News", URL: "https://news.mit.edu/topic/artificial-intelligence2/feed", Category: "ai", RefreshMinutes: RefreshHourly, Weight: 1.2}, // DISABLED: Feed errors
 	{Name: "AI News (Sebastian)", URL: "https://buttondown.email/ainews/rss", Category: "ai", RefreshMinutes: RefreshHourly, Weight: 1.1},
 
 	// ============================================
@@ -165,11 +159,8 @@ var DefaultRSSFeeds = []RSSFeedConfig{
 	// ============================================
 	// HEALTH & GLOBAL ORGS
 	// ============================================
-	// {Name: "WHO News", URL: "https://www.who.int/feeds/entity/mediacentre/news/en/rss.xml", Category: "health", RefreshMinutes: RefreshLazy, Weight: 1.3}, // DISABLED: 404 Not Found
 	{Name: "CDC Newsroom", URL: "https://tools.cdc.gov/api/v2/resources/media/316422.rss", Category: "health", RefreshMinutes: RefreshLazy, Weight: 1.2},
 	{Name: "UN News", URL: "https://news.un.org/feed/subscribe/en/news/all/rss.xml", Category: "global-org", RefreshMinutes: RefreshSlow, Weight: 1.2},
-	// {Name: "World Bank", URL: "https://blogs.worldbank.org/feed", Category: "global-org", RefreshMinutes: RefreshHourly, Weight: 1.0}, // DISABLED: 404 Not Found
-	// {Name: "IMF Blog", URL: "https://www.imf.org/en/News/rss?Language=ENG", Category: "global-org", RefreshMinutes: RefreshHourly, Weight: 1.1}, // DISABLED: Feed parse failure
 
 	// ============================================
 	// FINANCE & BUSINESS
@@ -182,9 +173,7 @@ var DefaultRSSFeeds = []RSSFeedConfig{
 	{Name: "MarketWatch", URL: "http://feeds.marketwatch.com/marketwatch/topstories/", Category: "finance", RefreshMinutes: RefreshNormal, Weight: 1.0},
 	{Name: "MarketWatch Breaking", URL: "http://feeds.marketwatch.com/marketwatch/marketpulse/", Category: "finance", RefreshMinutes: RefreshFast, Weight: 1.2},
 	{Name: "Economist", URL: "https://www.economist.com/latest/rss.xml", Category: "finance", RefreshMinutes: RefreshHourly, Weight: 1.4},
-	// {Name: "Forbes", URL: "https://www.forbes.com/real-time/feed2/", Category: "finance", RefreshMinutes: RefreshSlow, Weight: 0.9}, // DISABLED: 403 Forbidden
 	{Name: "Yahoo Finance", URL: "https://finance.yahoo.com/news/rssindex", Category: "finance", RefreshMinutes: RefreshNormal, Weight: 1.0},
-	// {Name: "Barron's", URL: "https://www.barrons.com/feed", Category: "finance", RefreshMinutes: RefreshSlow, Weight: 1.2}, // DISABLED: 403 Forbidden
 	{Name: "Seeking Alpha", URL: "https://seekingalpha.com/feed.xml", Category: "finance", RefreshMinutes: RefreshSlow, Weight: 1.0},
 	{Name: "Zero Hedge", URL: "https://feeds.feedburner.com/zerohedge/feed", Category: "finance", RefreshMinutes: RefreshNormal, Weight: 1.1},
 	{Name: "Calculated Risk", URL: "https://www.calculatedriskblog.com/feeds/posts/default", Category: "finance", RefreshMinutes: RefreshLazy, Weight: 1.2},
@@ -203,20 +192,16 @@ var DefaultRSSFeeds = []RSSFeedConfig{
 	{Name: "The War Zone", URL: "https://www.thedrive.com/the-war-zone/feed", Category: "military", RefreshMinutes: RefreshNormal, Weight: 1.4},
 	{Name: "Military Times", URL: "https://www.militarytimes.com/arc/outboundfeeds/rss/?outputType=xml", Category: "military", RefreshMinutes: RefreshSlow, Weight: 1.2},
 	{Name: "C4ISRNET", URL: "https://www.c4isrnet.com/arc/outboundfeeds/rss/?outputType=xml", Category: "military", RefreshMinutes: RefreshLazy, Weight: 1.1},
-	// {Name: "Stars & Stripes", URL: "https://www.stripes.com/rss", Category: "military", RefreshMinutes: RefreshSlow, Weight: 1.1}, // DISABLED: 404 Not Found
 	{Name: "War on the Rocks", URL: "https://warontherocks.com/feed/", Category: "military", RefreshMinutes: RefreshLazy, Weight: 1.3},
 	{Name: "Naval News", URL: "https://www.navalnews.com/feed/", Category: "military", RefreshMinutes: RefreshLazy, Weight: 1.1},
 	{Name: "Air & Space Forces", URL: "https://www.airandspaceforces.com/feed/", Category: "military", RefreshMinutes: RefreshLazy, Weight: 1.1},
 	{Name: "Army Times", URL: "https://www.armytimes.com/arc/outboundfeeds/rss/?outputType=xml", Category: "military", RefreshMinutes: RefreshLazy, Weight: 1.0},
 	{Name: "Navy Times", URL: "https://www.navytimes.com/arc/outboundfeeds/rss/?outputType=xml", Category: "military", RefreshMinutes: RefreshLazy, Weight: 1.0},
 	{Name: "USNI News", URL: "https://news.usni.org/feed", Category: "military", RefreshMinutes: RefreshLazy, Weight: 1.2},
-	// {Name: "Janes", URL: "https://www.janes.com/feeds/news", Category: "military", RefreshMinutes: RefreshLazy, Weight: 1.4}, // DISABLED: 404 Not Found
 	{Name: "r/CredibleDefense", URL: "https://www.reddit.com/r/CredibleDefense/hot/.rss?limit=25", Category: "military", RefreshMinutes: RefreshLazy, Weight: 1.2},
 	{Name: "r/LessCredibleDefence", URL: "https://www.reddit.com/r/LessCredibleDefence/hot/.rss?limit=25", Category: "military", RefreshMinutes: RefreshLazy, Weight: 1.0},
 	{Name: "r/ukraine", URL: "https://www.reddit.com/r/ukraine/hot/.rss?limit=25", Category: "military", RefreshMinutes: RefreshSlow, Weight: 1.1},
 	{Name: "r/CombatFootage", URL: "https://www.reddit.com/r/CombatFootage/hot/.rss?limit=25", Category: "military", RefreshMinutes: RefreshSlow, Weight: 1.0},
-	// {Name: "ISW", URL: "https://www.understandingwar.org/rss.xml", Category: "military", RefreshMinutes: RefreshLazy, Weight: 1.4}, // DISABLED: Feed errors
-	// {Name: "The Defense Post", URL: "https://www.thedefensepost.com/feed/", Category: "military", RefreshMinutes: RefreshSlow, Weight: 1.2}, // DISABLED: Feed parse failure
 	{Name: "Defence Blog", URL: "https://defence-blog.com/feed/", Category: "military", RefreshMinutes: RefreshSlow, Weight: 1.1},
 	{Name: "Army Technology", URL: "https://www.army-technology.com/feed/", Category: "military", RefreshMinutes: RefreshLazy, Weight: 1.0},
 	{Name: "Airforce Technology", URL: "https://www.airforce-technology.com/feed/", Category: "military", RefreshMinutes: RefreshLazy, Weight: 1.0},
@@ -228,13 +213,10 @@ var DefaultRSSFeeds = []RSSFeedConfig{
 	// MIDDLE EAST (Regional perspectives)
 	// ============================================
 	{Name: "BBC Middle East", URL: "https://feeds.bbci.co.uk/news/world/middle_east/rss.xml", Category: "middle-east", RefreshMinutes: RefreshSlow, Weight: 1.2},
-	// {Name: "Middle East Monitor", URL: "https://www.middleeastmonitor.com/feed/", Category: "middle-east", RefreshMinutes: RefreshSlow, Weight: 1.1}, // DISABLED: 403 Forbidden
 	{Name: "Times of Israel", URL: "https://www.timesofisrael.com/feed/", Category: "middle-east", RefreshMinutes: RefreshSlow, Weight: 1.2},
 	{Name: "Jerusalem Post", URL: "https://www.jpost.com/rss/rssfeedsfrontpage.aspx", Category: "middle-east", RefreshMinutes: RefreshSlow, Weight: 1.1},
-	// {Name: "Arab News", URL: "https://www.arabnews.com/rss.xml", Category: "middle-east", RefreshMinutes: RefreshSlow, Weight: 1.1}, // DISABLED: 403 Forbidden
 	{Name: "The New Arab", URL: "https://www.newarab.com/rss", Category: "middle-east", RefreshMinutes: RefreshSlow, Weight: 1.1},
 	{Name: "Al-Monitor", URL: "https://www.al-monitor.com/rss", Category: "middle-east", RefreshMinutes: RefreshSlow, Weight: 1.2},
-	// {Name: "Iran International", URL: "https://www.iranintl.com/en/rss", Category: "middle-east", RefreshMinutes: RefreshSlow, Weight: 1.1}, // DISABLED: Feed parse failure
 
 	// ============================================
 	// LATIN AMERICA
@@ -242,7 +224,6 @@ var DefaultRSSFeeds = []RSSFeedConfig{
 	{Name: "MercoPress", URL: "https://en.mercopress.com/rss/", Category: "latin-america", RefreshMinutes: RefreshSlow, Weight: 1.1},
 	{Name: "Prensa Latina", URL: "https://www.plenglish.com/feed/", Category: "latin-america", RefreshMinutes: RefreshSlow, Weight: 1.0},
 	{Name: "BBC Mundo LatAm", URL: "https://feeds.bbci.co.uk/mundo/america_latina/rss.xml", Category: "latin-america", RefreshMinutes: RefreshSlow, Weight: 1.1},
-	// {Name: "Buenos Aires Herald", URL: "https://buenosairesherald.com/feed/", Category: "latin-america", RefreshMinutes: RefreshLazy, Weight: 1.0}, // DISABLED: 403 Forbidden
 	{Name: "Brazil Reports", URL: "https://brazilreports.com/feed/", Category: "latin-america", RefreshMinutes: RefreshLazy, Weight: 1.0},
 	{Name: "Mexico News Daily", URL: "https://mexiconewsdaily.com/feed/", Category: "latin-america", RefreshMinutes: RefreshLazy, Weight: 1.0},
 	{Name: "Colombia Reports", URL: "https://colombiareports.com/feed/", Category: "latin-america", RefreshMinutes: RefreshLazy, Weight: 1.0},
@@ -256,16 +237,8 @@ var DefaultRSSFeeds = []RSSFeedConfig{
 	{Name: "Channel News Asia", URL: "https://www.channelnewsasia.com/api/v1/rss-outbound-feed?_format=xml", Category: "asia-pacific", RefreshMinutes: RefreshSlow, Weight: 1.2},
 	{Name: "Straits Times", URL: "https://www.straitstimes.com/news/asia/rss.xml", Category: "asia-pacific", RefreshMinutes: RefreshSlow, Weight: 1.1},
 	{Name: "Korea Herald", URL: "http://www.koreaherald.com/rss/020100000000.xml", Category: "asia-pacific", RefreshMinutes: RefreshLazy, Weight: 1.0},
-	// {Name: "Taipei Times", URL: "https://www.taipeitimes.com/xml/rss.xml", Category: "asia-pacific", RefreshMinutes: RefreshLazy, Weight: 1.1}, // DISABLED: 404 Not Found
 	{Name: "The Diplomat", URL: "https://thediplomat.com/feed/", Category: "asia-pacific", RefreshMinutes: RefreshLazy, Weight: 1.3},
-	// {Name: "East Asia Forum", URL: "https://eastasiaforum.org/feed/", Category: "asia-pacific", RefreshMinutes: RefreshLazy, Weight: 1.3}, // DISABLED: 403 Forbidden
-	// {Name: "Lowy Interpreter", URL: "https://www.lowyinstitute.org/the-interpreter/feed", Category: "asia-pacific", RefreshMinutes: RefreshLazy, Weight: 1.4}, // DISABLED: 404 Not Found
-	// {Name: "CSIS Asia", URL: "https://www.csis.org/regions/asia/feed", Category: "asia-pacific", RefreshMinutes: RefreshHourly, Weight: 1.3}, // DISABLED: Feed errors
 	{Name: "CSIS AMTI", URL: "https://amti.csis.org/feed/", Category: "asia-pacific", RefreshMinutes: RefreshLazy, Weight: 1.4},
-	// {Name: "Stimson East Asia", URL: "https://www.stimson.org/program/east-asia/feed/", Category: "asia-pacific", RefreshMinutes: RefreshHourly, Weight: 1.2}, // DISABLED: 404 Not Found
-	// {Name: "Stimson South Asia", URL: "https://www.stimson.org/program/south-asia/feed/", Category: "asia-pacific", RefreshMinutes: RefreshHourly, Weight: 1.2}, // DISABLED: 404 Not Found
-	// {Name: "Asia Society", URL: "https://asiasociety.org/policy-institute/feed", Category: "asia-pacific", RefreshMinutes: RefreshHourly, Weight: 1.2}, // DISABLED: Feed errors
-	// {Name: "Crisis Group Asia", URL: "https://www.crisisgroup.org/asia/feed", Category: "asia-pacific", RefreshMinutes: RefreshHourly, Weight: 1.4}, // DISABLED: Feed errors
 	{Name: "r/China", URL: "https://www.reddit.com/r/China/hot/.rss?limit=25", Category: "asia-pacific", RefreshMinutes: RefreshLazy, Weight: 1.0},
 	{Name: "r/taiwan", URL: "https://www.reddit.com/r/taiwan/hot/.rss?limit=25", Category: "asia-pacific", RefreshMinutes: RefreshLazy, Weight: 1.0},
 
@@ -278,14 +251,12 @@ var DefaultRSSFeeds = []RSSFeedConfig{
 	{Name: "Sputnik", URL: "https://sputnikglobe.com/export/rss2/index.xml", Category: "russia", RefreshMinutes: RefreshSlow, Weight: 1.1},
 	{Name: "Moscow Times", URL: "https://www.themoscowtimes.com/rss/news", Category: "russia", RefreshMinutes: RefreshSlow, Weight: 1.3},
 	{Name: "Meduza", URL: "https://meduza.io/rss/all", Category: "russia", RefreshMinutes: RefreshSlow, Weight: 1.4},
-	// {Name: "r/russia", URL: "https://www.reddit.com/r/russia/hot/.rss?limit=25", Category: "russia", RefreshMinutes: RefreshLazy, Weight: 0.9}, // DISABLED: Frequent rate limiting
 
 	// ============================================
 	// UKRAINE (Official & Independent)
 	// On-the-ground reporting, official updates, counter-narratives
 	// ============================================
 	{Name: "Ukrinform", URL: "https://www.ukrinform.net/rss/block-lastnews", Category: "ukraine", RefreshMinutes: RefreshNormal, Weight: 1.3},
-	// {Name: "Kyiv Independent", URL: "https://kyivindependent.com/feed/", Category: "ukraine", RefreshMinutes: RefreshNormal, Weight: 1.5}, // DISABLED: 404 Not Found
 	{Name: "Kyiv Post", URL: "https://www.kyivpost.com/feed", Category: "ukraine", RefreshMinutes: RefreshSlow, Weight: 1.2},
 	{Name: "Euromaidan Press", URL: "https://euromaidanpress.com/feed/", Category: "ukraine", RefreshMinutes: RefreshSlow, Weight: 1.2},
 	{Name: "Ukrainska Pravda", URL: "https://www.pravda.com.ua/eng/rss/", Category: "ukraine", RefreshMinutes: RefreshSlow, Weight: 1.3},
@@ -298,21 +269,14 @@ var DefaultRSSFeeds = []RSSFeedConfig{
 	// ============================================
 	{Name: "Foreign Affairs", URL: "https://www.foreignaffairs.com/rss.xml", Category: "think-tank", RefreshMinutes: RefreshHourly, Weight: 1.5},
 	{Name: "Geopolitical Futures", URL: "https://geopoliticalfutures.com/feed/", Category: "think-tank", RefreshMinutes: RefreshHourly, Weight: 1.3},
-	// {Name: "Chatham House", URL: "https://www.chathamhouse.org/publications/feed", Category: "think-tank", RefreshMinutes: RefreshHourly, Weight: 1.3}, // DISABLED: 403 Forbidden
-	// {Name: "Carnegie Endowment", URL: "https://carnegieendowment.org/rss/feeds/articles.xml", Category: "think-tank", RefreshMinutes: RefreshHourly, Weight: 1.4}, // DISABLED: Feed parse failure
-	// {Name: "Brookings", URL: "https://www.brookings.edu/feed/", Category: "think-tank", RefreshMinutes: RefreshHourly, Weight: 1.3}, // DISABLED: Feed parse failure
-	// {Name: "CSIS", URL: "https://www.csis.org/analysis/feed", Category: "think-tank", RefreshMinutes: RefreshHourly, Weight: 1.4}, // DISABLED: Feed errors
 	{Name: "Atlantic Council", URL: "https://www.atlanticcouncil.org/feed/", Category: "think-tank", RefreshMinutes: RefreshHourly, Weight: 1.3},
 	{Name: "Crisis Group", URL: "https://www.crisisgroup.org/rss.xml", Category: "think-tank", RefreshMinutes: RefreshHourly, Weight: 1.4},
-	// {Name: "Geopolitical Monitor", URL: "https://www.geopoliticalmonitor.com/feed/", Category: "think-tank", RefreshMinutes: RefreshLazy, Weight: 1.2}, // DISABLED: Feed errors
 	{Name: "Encyclopedia Geopolitica", URL: "https://encyclopediageopolitica.com/feed/", Category: "think-tank", RefreshMinutes: RefreshLazy, Weight: 1.1},
 	{Name: "The Geopolitics", URL: "https://thegeopolitics.com/feed", Category: "think-tank", RefreshMinutes: RefreshLazy, Weight: 1.1},
-	// {Name: "Russia Matters", URL: "https://www.russiamatters.org/feed", Category: "think-tank", RefreshMinutes: RefreshLazy, Weight: 1.3}, // DISABLED: 403 Forbidden
 
 	// ============================================
 	// POLITICS & POLICY
 	// ============================================
-	// {Name: "Politico", URL: "https://www.politico.com/rss/politicopicks.xml", Category: "politics", RefreshMinutes: RefreshSlow, Weight: 1.1}, // DISABLED: 403 Forbidden
 	{Name: "The Hill", URL: "https://thehill.com/feed/", Category: "politics", RefreshMinutes: RefreshSlow, Weight: 1.0},
 	{Name: "Roll Call", URL: "https://www.rollcall.com/feed/", Category: "politics", RefreshMinutes: RefreshLazy, Weight: 1.0},
 	{Name: "FiveThirtyEight", URL: "https://fivethirtyeight.com/features/feed/", Category: "politics", RefreshMinutes: RefreshHourly, Weight: 1.2},
@@ -360,15 +324,10 @@ var DefaultRSSFeeds = []RSSFeedConfig{
 	{Name: "ESPN", URL: "https://www.espn.com/espn/rss/news", Category: "sports", RefreshMinutes: RefreshSlow, Weight: 1.0},
 	{Name: "BBC Sport", URL: "https://feeds.bbci.co.uk/sport/rss.xml", Category: "sports", RefreshMinutes: RefreshSlow, Weight: 1.0},
 	{Name: "Sky Sports", URL: "https://www.skysports.com/rss/12040", Category: "sports", RefreshMinutes: RefreshSlow, Weight: 1.0},
-	// {Name: "The Athletic", URL: "https://theathletic.com/feed/", Category: "sports", RefreshMinutes: RefreshLazy, Weight: 1.1}, // DISABLED: Feed parse failure
 
 	// ============================================
 	// REGIONAL US
 	// ============================================
-	// {Name: "Chicago Tribune", URL: "https://www.chicagotribune.com/arcio/rss/", Category: "regional-us", RefreshMinutes: RefreshHourly, Weight: 0.8}, // DISABLED: Feed parse failure
-	// {Name: "Boston Globe", URL: "https://www.bostonglobe.com/rss/hpheadlines", Category: "regional-us", RefreshMinutes: RefreshHourly, Weight: 0.8}, // DISABLED: 404 Not Found
-	// {Name: "SF Chronicle", URL: "https://www.sfchronicle.com/rss/feed/RSS-Bay-Area-News-702.php", Category: "regional-us", RefreshMinutes: RefreshHourly, Weight: 0.8}, // DISABLED: 404 Not Found
-	// {Name: "Miami Herald", URL: "https://www.miamiherald.com/latest-news/index.rss", Category: "regional-us", RefreshMinutes: RefreshHourly, Weight: 0.8}, // DISABLED: Feed parse failure
 	{Name: "Seattle Times", URL: "https://www.seattletimes.com/feed/", Category: "regional-us", RefreshMinutes: RefreshHourly, Weight: 0.8},
 	{Name: "Denver Post", URL: "https://www.denverpost.com/feed/", Category: "regional-us", RefreshMinutes: RefreshHourly, Weight: 0.8},
 }
