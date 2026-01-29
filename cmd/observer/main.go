@@ -63,11 +63,13 @@ func main() {
 		embedder = embed.NewOllamaEmbedder("http://localhost:11434", "mxbai-embed-large")
 	}
 
-	// Reranker: Jina for batch reranking, Ollama for per-entry scoring
-	ollamaReranker := rerankpkg.NewOllamaReranker("http://localhost:11434", "")
+	// Reranker: prefer Jina batch reranking, fall back to Ollama per-entry scoring
+	var ollamaReranker *rerankpkg.OllamaReranker
 	var jinaReranker *rerankpkg.JinaReranker
 	if jinaKey != "" {
 		jinaReranker = rerankpkg.NewJinaReranker(jinaKey, rerankModel)
+	} else {
+		ollamaReranker = rerankpkg.NewOllamaReranker("http://localhost:11434", "")
 	}
 
 	// Default sources (can be made configurable later)
@@ -146,10 +148,10 @@ func main() {
 				return ui.QueryEmbedded{Query: query, Embedding: embedding, Err: err}
 			}
 		},
-		// scoreEntry: score a single entry using cross-encoder (Ollama path)
+		// scoreEntry: score a single entry using cross-encoder (Ollama path only)
 		ScoreEntry: func(query string, doc string, index int) tea.Cmd {
 			return func() tea.Msg {
-				if !ollamaReranker.Available() {
+				if ollamaReranker == nil || !ollamaReranker.Available() {
 					return ui.EntryReranked{Index: index, Score: 0.5, Err: nil}
 				}
 				score, err := ollamaReranker.ScoreOne(ctx, query, doc)
