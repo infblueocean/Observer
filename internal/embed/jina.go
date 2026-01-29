@@ -28,6 +28,7 @@ type jinaEmbedRequest struct {
 	Input      []string `json:"input"`
 	Task       string   `json:"task"`
 	Dimensions int      `json:"dimensions"`
+	Truncate   bool     `json:"truncate"`
 }
 
 // jinaEmbedResponse represents the response from the Jina embeddings API.
@@ -136,6 +137,7 @@ func (e *JinaEmbedder) embed(ctx context.Context, input []string, task string) (
 		Input:      input,
 		Task:       task,
 		Dimensions: 1024,
+		Truncate:   true,
 	}
 
 	jsonBody, err := json.Marshal(reqBody)
