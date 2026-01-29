@@ -55,15 +55,12 @@ func main() {
 	embedModel := envOrDefault("JINA_EMBED_MODEL", "jina-embeddings-v3")
 	rerankModel := envOrDefault("JINA_RERANK_MODEL", "jina-reranker-v3")
 
-	// Embedder and reranker: Jina API only (Ollama disabled)
-	var embedder embed.Embedder
-	var jinaReranker *rerank.JinaReranker
-	if jinaKey != "" {
-		embedder = embed.NewJinaEmbedder(jinaKey, embedModel)
-		jinaReranker = rerank.NewJinaReranker(jinaKey, rerankModel)
-	} else {
-		log.Println("Warning: JINA_API_KEY not set — embeddings and reranking disabled")
+	// Embedder and reranker: Jina API required
+	if jinaKey == "" {
+		log.Fatal("JINA_API_KEY environment variable is required")
 	}
+	embedder := embed.NewJinaEmbedder(jinaKey, embedModel)
+	jinaReranker := rerank.NewJinaReranker(jinaKey, rerankModel)
 
 	// Default sources (can be made configurable later)
 	sources := []fetch.Source{
@@ -97,7 +94,7 @@ func main() {
 				// Use semantic dedup (falls back to URL dedup if no embeddings)
 				// Threshold 0.85 means items with >85% cosine similarity are considered duplicates
 				items = filter.SemanticDedup(items, embeddings, 0.85)
-				items = filter.LimitPerSource(items, 20)
+				items = filter.LimitPerSource(items, 50)
 
 				// Rebuild embeddings map for filtered items only
 				filteredEmbeddings := make(map[string][]float32)
@@ -126,25 +123,12 @@ func main() {
 		// embedQuery: embed a query string for semantic search
 		EmbedQuery: func(query string) tea.Cmd {
 			return func() tea.Msg {
-				if embedder == nil || !embedder.Available() {
-					return ui.QueryEmbedded{Query: query, Err: nil}
-				}
-				type queryEmbedder interface {
-					EmbedQuery(ctx context.Context, query string) ([]float32, error)
-				}
-				if qe, ok := embedder.(queryEmbedder); ok {
-					emb, err := qe.EmbedQuery(ctx, query)
-					return ui.QueryEmbedded{Query: query, Embedding: emb, Err: err}
-				}
-				embedding, err := embedder.Embed(ctx, query)
-				return ui.QueryEmbedded{Query: query, Embedding: embedding, Err: err}
+				emb, err := embedder.EmbedQuery(ctx, query)
+				return ui.QueryEmbedded{Query: query, Embedding: emb, Err: err}
 			}
 		},
-	}
-
-	// BatchRerank: single API call for all docs (Jina only)
-	if jinaReranker != nil {
-		cfg.BatchRerank = func(query string, docs []string) tea.Cmd {
+		// batchRerank: single Jina API call for all docs
+		BatchRerank: func(query string, docs []string) tea.Cmd {
 			return func() tea.Msg {
 				scores, err := jinaReranker.Rerank(ctx, query, docs)
 				if err != nil {
@@ -158,7 +142,7 @@ func main() {
 				}
 				return ui.RerankComplete{Query: query, Scores: result}
 			}
-		}
+		},
 	}
 
 	app := ui.NewAppWithConfig(cfg)
