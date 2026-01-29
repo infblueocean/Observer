@@ -74,10 +74,10 @@ func main() {
 	fmt.Printf("Needing embedding: %d\n", needingEmbedding)
 	fmt.Println()
 
-	// If there are existing embeddings, prompt to clear them
-	// (old mxbai embeddings are incompatible with Jina)
-	if existingEmbeddings > 0 {
-		fmt.Printf("Clear %d existing embeddings and re-embed with Jina? [y/N] ", existingEmbeddings)
+	// If --clear flag, prompt to clear existing embeddings
+	// (needed when switching embedding models)
+	if len(os.Args) > 1 && os.Args[1] == "--clear" && existingEmbeddings > 0 {
+		fmt.Printf("Clear %d existing embeddings and re-embed? [y/N] ", existingEmbeddings)
 		reader := bufio.NewReader(os.Stdin)
 		answer, _ := reader.ReadString('\n')
 		answer = strings.TrimSpace(strings.ToLower(answer))
@@ -99,8 +99,8 @@ func main() {
 	fmt.Println("Starting backfill... (Ctrl+C to stop, re-run to resume)")
 	fmt.Println()
 
-	// Process in batches of 100
-	batchSize := 100
+	// Process in batches of 50 (Jina has payload limits)
+	batchSize := 50
 	embedded := 0
 
 	for {
@@ -129,14 +129,22 @@ func main() {
 			}
 		}
 
-		// Embed batch
-		embeddings, err := embedder.EmbedBatch(ctx, texts)
-		if err != nil {
+		// Embed batch with retries
+		var embeddings [][]float32
+		for attempt := 0; attempt < 3; attempt++ {
 			if ctx.Err() != nil {
 				fmt.Printf("\nInterrupted. Embedded %d items. Re-run to continue.\n", embedded)
 				return
 			}
-			log.Fatalf("Embedding failed: %v", err)
+			embeddings, err = embedder.EmbedBatch(ctx, texts)
+			if err == nil {
+				break
+			}
+			log.Printf("Batch attempt %d failed: %v", attempt+1, err)
+		}
+		if err != nil {
+			log.Printf("Skipping batch of %d items after 3 failures: %v", len(items), err)
+			continue
 		}
 
 		// Save embeddings
