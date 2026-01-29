@@ -8,11 +8,25 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"github.com/abelbrown/observer/internal/embed"
 	"github.com/abelbrown/observer/internal/store"
 )
+
+var htmlTagRe = regexp.MustCompile(`<[^>]*>`)
+var whitespaceRe = regexp.MustCompile(`\s+`)
+
+func sanitizeForEmbedding(s string, maxChars int) string {
+	s = htmlTagRe.ReplaceAllString(s, " ")
+	s = whitespaceRe.ReplaceAllString(s, " ")
+	s = strings.TrimSpace(s)
+	if len(s) > maxChars {
+		s = s[:maxChars]
+	}
+	return s
+}
 
 func main() {
 	// Handle graceful shutdown
@@ -103,12 +117,15 @@ func main() {
 			break
 		}
 
-		// Build texts
+		// Build texts (strip HTML, cap length)
 		texts := make([]string, len(items))
 		for i, item := range items {
 			texts[i] = item.Title
 			if item.Summary != "" {
-				texts[i] += " " + item.Summary
+				clean := sanitizeForEmbedding(item.Summary, 2000-len(item.Title))
+				if clean != "" {
+					texts[i] += " " + clean
+				}
 			}
 		}
 

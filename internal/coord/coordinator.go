@@ -4,6 +4,8 @@ package coord
 import (
 	"context"
 	"log"
+	"regexp"
+	"strings"
 	"sync"
 	"time"
 
@@ -142,6 +144,36 @@ func (c *Coordinator) embedBatch(ctx context.Context, limit int) {
 	c.embedItems(ctx, items)
 }
 
+// htmlTagRe matches HTML tags.
+var htmlTagRe = regexp.MustCompile(`<[^>]*>`)
+
+// whitespaceRe matches runs of whitespace.
+var whitespaceRe = regexp.MustCompile(`\s+`)
+
+// sanitizeForEmbedding strips HTML tags, collapses whitespace, and caps at maxChars.
+func sanitizeForEmbedding(s string, maxChars int) string {
+	s = htmlTagRe.ReplaceAllString(s, " ")
+	s = whitespaceRe.ReplaceAllString(s, " ")
+	s = strings.TrimSpace(s)
+	if len(s) > maxChars {
+		s = s[:maxChars]
+	}
+	return s
+}
+
+// embedTextForItem builds the text to embed for a single item.
+// Title + sanitized summary, capped at ~2000 chars (~500 tokens).
+func embedTextForItem(item store.Item) string {
+	text := item.Title
+	if item.Summary != "" {
+		clean := sanitizeForEmbedding(item.Summary, 2000-len(text))
+		if clean != "" {
+			text += " " + clean
+		}
+	}
+	return text
+}
+
 // embedItems generates and saves embeddings for the given items.
 // Uses batch embedding if available, otherwise falls back to sequential.
 func (c *Coordinator) embedItems(ctx context.Context, items []store.Item) {
@@ -153,10 +185,7 @@ func (c *Coordinator) embedItems(ctx context.Context, items []store.Item) {
 	if batcher, ok := c.embedder.(embed.BatchEmbedder); ok {
 		texts := make([]string, len(items))
 		for i, item := range items {
-			texts[i] = item.Title
-			if item.Summary != "" {
-				texts[i] += " " + item.Summary
-			}
+			texts[i] = embedTextForItem(item)
 		}
 		embeddings, err := batcher.EmbedBatch(ctx, texts)
 		if err != nil {
@@ -185,10 +214,7 @@ func (c *Coordinator) embedItems(ctx context.Context, items []store.Item) {
 			return
 		}
 
-		text := item.Title
-		if item.Summary != "" {
-			text += " " + item.Summary
-		}
+		text := embedTextForItem(item)
 
 		embedding, err := c.embedder.Embed(ctx, text)
 		if err != nil {
