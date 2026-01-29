@@ -3,6 +3,7 @@
 package filter
 
 import (
+	"context"
 	"sort"
 	"strings"
 	"time"
@@ -158,6 +159,113 @@ func LimitPerSource(items []store.Item, maxPerSource int) []store.Item {
 	})
 
 	return result
+}
+
+// RerankByQuery reranks items by cosine similarity to a query embedding.
+// Items with embeddings are sorted by similarity (highest first).
+// Items without embeddings are placed at the end, maintaining their original order.
+func RerankByQuery(items []store.Item, embeddings map[string][]float32, queryEmbedding []float32) []store.Item {
+	if len(items) == 0 || len(queryEmbedding) == 0 || embeddings == nil {
+		return items
+	}
+
+	type scored struct {
+		item       store.Item
+		similarity float32
+		hasEmbed   bool
+	}
+
+	scoredItems := make([]scored, 0, len(items))
+	for _, item := range items {
+		s := scored{item: item}
+		if emb, ok := embeddings[item.ID]; ok && len(emb) > 0 {
+			s.similarity = embed.CosineSimilarity(emb, queryEmbedding)
+			s.hasEmbed = true
+		}
+		scoredItems = append(scoredItems, s)
+	}
+
+	// Sort: items with embeddings first (by similarity desc), then items without
+	// Use SliceStable to maintain original order for items without embeddings
+	sort.SliceStable(scoredItems, func(i, j int) bool {
+		// Both have embeddings: sort by similarity desc
+		if scoredItems[i].hasEmbed && scoredItems[j].hasEmbed {
+			return scoredItems[i].similarity > scoredItems[j].similarity
+		}
+		// Only one has embedding: that one goes first
+		if scoredItems[i].hasEmbed != scoredItems[j].hasEmbed {
+			return scoredItems[i].hasEmbed
+		}
+		// Neither has embedding: maintain original order (stable sort handles this)
+		return false
+	})
+
+	result := make([]store.Item, len(scoredItems))
+	for i, s := range scoredItems {
+		result[i] = s.item
+	}
+	return result
+}
+
+// RerankByCrossEncoder reranks items using a cross-encoder reranker model.
+// Takes the top N candidates and scores them against the query using the reranker.
+// Returns items sorted by relevance score (highest first).
+// If reranker fails or is unavailable, returns items unchanged.
+func RerankByCrossEncoder(ctx context.Context, items []store.Item, query string, reranker Reranker) []store.Item {
+	if len(items) == 0 || reranker == nil || !reranker.Available() {
+		return items
+	}
+
+	// Extract titles for reranking
+	docs := make([]string, len(items))
+	for i, item := range items {
+		docs[i] = item.Title
+		if item.Summary != "" && len(item.Summary) < 200 {
+			docs[i] += " - " + item.Summary
+		}
+	}
+
+	// Score documents
+	scores, err := reranker.Rerank(ctx, query, docs)
+	if err != nil || len(scores) != len(items) {
+		return items // Return unchanged on error
+	}
+
+	// Create scored items for sorting
+	type scored struct {
+		item  store.Item
+		score float32
+	}
+	scoredItems := make([]scored, len(items))
+	for i, item := range items {
+		scoredItems[i] = scored{item: item, score: scores[i].Score}
+	}
+
+	// Sort by score descending
+	sort.SliceStable(scoredItems, func(i, j int) bool {
+		return scoredItems[i].score > scoredItems[j].score
+	})
+
+	// Extract sorted items
+	result := make([]store.Item, len(scoredItems))
+	for i, s := range scoredItems {
+		result[i] = s.item
+	}
+
+	return result
+}
+
+// Reranker is the interface for cross-encoder reranking models.
+// This is a subset of the rerank.Reranker interface for decoupling.
+type Reranker interface {
+	Available() bool
+	Rerank(ctx context.Context, query string, documents []string) ([]Score, error)
+}
+
+// Score represents a document's relevance score.
+type Score struct {
+	Index int
+	Score float32
 }
 
 // SemanticDedup removes semantically similar items using embeddings.

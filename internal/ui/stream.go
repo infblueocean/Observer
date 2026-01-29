@@ -135,8 +135,8 @@ func RenderStatusBar(cursor, total int, width int, loading bool) string {
 	keys := []string{
 		StatusBarKey.Render("j/k") + StatusBarText.Render(":nav"),
 		StatusBarKey.Render("Enter") + StatusBarText.Render(":read"),
+		StatusBarKey.Render("/") + StatusBarText.Render(":search"),
 		StatusBarKey.Render("r") + StatusBarText.Render(":refresh"),
-		StatusBarKey.Render("f") + StatusBarText.Render(":fetch"),
 		StatusBarKey.Render("q") + StatusBarText.Render(":quit"),
 	}
 	keyHints := strings.Join(keys, " ")
@@ -151,4 +151,65 @@ func RenderStatusBar(cursor, total int, width int, loading bool) string {
 
 	bar := position + strings.Repeat(" ", padding) + keyHints
 	return StatusBar.Width(width).Render(bar)
+}
+
+// RenderStatusBarWithFilter renders the status bar when filter is active.
+func RenderStatusBarWithFilter(cursor, filtered, total int, width int, loading bool) string {
+	// Left side: position info with filter count
+	var position string
+	if loading {
+		position = " Loading... "
+	} else if filtered == 0 {
+		position = fmt.Sprintf(" 0/%d (filtered) ", total)
+	} else {
+		position = fmt.Sprintf(" %d/%d (filtered) ", cursor+1, filtered)
+	}
+
+	// Right side: filter-specific key hints
+	keys := []string{
+		StatusBarKey.Render("j/k") + StatusBarText.Render(":nav"),
+		StatusBarKey.Render("Enter") + StatusBarText.Render(":read"),
+		StatusBarKey.Render("Esc") + StatusBarText.Render(":clear"),
+	}
+	keyHints := strings.Join(keys, " ")
+
+	// Calculate padding to fill width
+	leftWidth := lipgloss.Width(position)
+	rightWidth := lipgloss.Width(keyHints)
+	padding := width - leftWidth - rightWidth
+	if padding < 0 {
+		padding = 0
+	}
+
+	bar := position + strings.Repeat(" ", padding) + keyHints
+	return StatusBar.Width(width).Render(bar)
+}
+
+// RenderFilterBarWithStatus renders the filter input bar with a custom status indicator.
+// status can be empty (no indicator), "embedding", "reranking", etc.
+func RenderFilterBarWithStatus(filterText string, filtered, total int, width int, status string) string {
+	// Show filter prompt with current text
+	prompt := FilterBarPrompt.Render("/")
+	text := FilterBarText.Render(filterText)
+
+	// Show status indicator if in progress
+	var statusIndicator string
+	switch status {
+	case "embedding":
+		statusIndicator = FilterBarCount.Render(" ...")
+	case "reranking":
+		statusIndicator = FilterBarCount.Render(" (reranking...)")
+	}
+
+	count := FilterBarCount.Render(fmt.Sprintf(" %d/%d", filtered, total))
+
+	content := prompt + text + statusIndicator + count
+	contentWidth := lipgloss.Width(content)
+	padding := width - contentWidth - 2 // -2 for bar padding
+	if padding < 0 {
+		padding = 0
+	}
+
+	bar := content + strings.Repeat(" ", padding)
+	return FilterBar.Width(width).Render(bar)
 }

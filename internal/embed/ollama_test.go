@@ -41,6 +41,38 @@ func TestAvailable(t *testing.T) {
 	}
 }
 
+func TestAvailableWithLatestSuffix(t *testing.T) {
+	// Mock server that returns model with :latest suffix (as Ollama actually does)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/tags" {
+			http.NotFound(w, r)
+			return
+		}
+
+		resp := ollamaTagsResponse{
+			Models: []ollamaModel{
+				{Name: "mxbai-embed-large:latest"},
+				{Name: "llama2:latest"},
+			},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	// Test that model name without :latest suffix is matched
+	embedder := NewOllamaEmbedder(server.URL, "mxbai-embed-large")
+	if !embedder.Available() {
+		t.Error("Available() returned false, want true (should match model:latest when model is requested)")
+	}
+
+	// Test that exact match still works
+	embedder2 := NewOllamaEmbedder(server.URL, "mxbai-embed-large:latest")
+	if !embedder2.Available() {
+		t.Error("Available() returned false, want true (exact match should work)")
+	}
+}
+
 func TestNotAvailable(t *testing.T) {
 	tests := []struct {
 		name    string

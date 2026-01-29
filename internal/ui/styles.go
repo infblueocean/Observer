@@ -9,7 +9,6 @@ var (
 	colorMuted     = lipgloss.Color("240") // Darker gray
 	colorHighlight = lipgloss.Color("212") // Pink
 	colorSuccess   = lipgloss.Color("78")  // Green
-	colorWarning   = lipgloss.Color("220") // Yellow
 )
 
 // SelectedItem style for the currently highlighted item.
@@ -69,3 +68,40 @@ var ErrorStyle = lipgloss.NewStyle().
 var HelpStyle = lipgloss.NewStyle().
 	Foreground(colorMuted).
 	Padding(1, 2)
+
+// FilterBar style for the filter input bar.
+var FilterBar = lipgloss.NewStyle().
+	Foreground(lipgloss.Color("255")).
+	Background(lipgloss.Color("240")).
+	Padding(0, 1)
+
+// FilterBarPrompt style for the "/" prompt.
+var FilterBarPrompt = lipgloss.NewStyle().
+	Foreground(colorHighlight).
+	Bold(true)
+
+// FilterBarText style for the filter input text.
+var FilterBarText = lipgloss.NewStyle().
+	Foreground(lipgloss.Color("255"))
+
+// FilterBarCount style for the filtered count.
+var FilterBarCount = lipgloss.NewStyle().
+	Foreground(colorSecondary)
+
+// ProgressCheckmark style for completed rerank entries.
+var ProgressCheckmark = lipgloss.NewStyle().
+	Foreground(colorSuccess).
+	Bold(true)
+
+// ProgressTitle style for entry titles in progress view.
+var ProgressTitle = lipgloss.NewStyle().
+	Foreground(colorSecondary)
+
+// ProgressActiveTitle style for the currently processing entry.
+var ProgressActiveTitle = lipgloss.NewStyle().
+	Foreground(lipgloss.Color("255"))
+
+// ProgressCount style for the entry counter.
+var ProgressCount = lipgloss.NewStyle().
+	Foreground(colorMuted)
+

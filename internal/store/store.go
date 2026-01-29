@@ -346,6 +346,20 @@ func (s *Store) SaveEmbedding(id string, embedding []float32) error {
 	return nil
 }
 
+// CountItemsNeedingEmbedding returns the number of items with NULL embedding.
+// Thread-safe: acquires read lock.
+func (s *Store) CountItemsNeedingEmbedding() (int, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var count int
+	err := s.db.QueryRow("SELECT COUNT(*) FROM items WHERE embedding IS NULL").Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("count items needing embedding: %w", err)
+	}
+	return count, nil
+}
+
 // GetItemsNeedingEmbedding returns items with NULL embedding.
 // Returns oldest items first (by fetched_at) up to limit.
 // Thread-safe: acquires read lock.
@@ -457,4 +471,32 @@ func repeatString(s string, n int) string {
 		return ""
 	}
 	return strings.Repeat(s, n)
+}
+
+// ClearAllEmbeddings sets all embeddings to NULL.
+// Returns the number of items that had their embeddings cleared.
+// Thread-safe: acquires write lock.
+func (s *Store) ClearAllEmbeddings() (int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	result, err := s.db.Exec("UPDATE items SET embedding = NULL WHERE embedding IS NOT NULL")
+	if err != nil {
+		return 0, fmt.Errorf("clear embeddings: %w", err)
+	}
+	return result.RowsAffected()
+}
+
+// CountAllItems returns the total number of items in the database.
+// Thread-safe: acquires read lock.
+func (s *Store) CountAllItems() (int, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var count int
+	err := s.db.QueryRow("SELECT COUNT(*) FROM items").Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("count all items: %w", err)
+	}
+	return count, nil
 }

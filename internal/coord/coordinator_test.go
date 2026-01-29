@@ -917,3 +917,312 @@ func TestCoordinatorParallelRespectsLimit(t *testing.T) {
 		t.Errorf("max concurrent fetches was %d, expected at least 2 to prove parallelism", max)
 	}
 }
+
+func TestCoordinatorEmbeddingWorkerProcessesItems(t *testing.T) {
+	// Setup
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("failed to open store: %v", err)
+	}
+	defer s.Close()
+
+	// Pre-populate store with items that need embedding
+	now := time.Now()
+	items := []store.Item{
+		{ID: "item1", SourceType: "rss", SourceName: "TestSource", Title: "Test 1", URL: "http://example.com/1", Published: now, Fetched: now},
+		{ID: "item2", SourceType: "rss", SourceName: "TestSource", Title: "Test 2", URL: "http://example.com/2", Published: now, Fetched: now},
+		{ID: "item3", SourceType: "rss", SourceName: "TestSource", Title: "Test 3", URL: "http://example.com/3", Published: now, Fetched: now},
+	}
+	_, err = s.SaveItems(items)
+	if err != nil {
+		t.Fatalf("failed to save items: %v", err)
+	}
+
+	// Create embedder that tracks calls
+	var embedCount atomic.Int32
+	embedder := &mockEmbedder{
+		available: true,
+		embedFunc: func(ctx context.Context, text string) ([]float32, error) {
+			embedCount.Add(1)
+			return []float32{0.1, 0.2, 0.3}, nil
+		},
+	}
+
+	sources := []fetch.Source{}
+	mock := &mockFetcher{}
+	coord := NewCoordinatorWithFetcher(s, mock, embedder, sources)
+
+	// Start embedding worker with cancellable context
+	ctx, cancel := context.WithCancel(context.Background())
+	coord.StartEmbeddingWorker(ctx)
+
+	// Wait for embeddings to be processed (worker runs every 2 seconds)
+	// We wait up to 5 seconds for all 3 items to be embedded
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if embedCount.Load() >= 3 {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	// Cancel and wait for worker to stop
+	cancel()
+	coord.Wait()
+
+	// Verify all items were embedded
+	count := embedCount.Load()
+	if count < 3 {
+		t.Errorf("expected at least 3 embed calls, got %d", count)
+	}
+
+	// Verify embeddings were saved
+	for _, item := range items {
+		emb, err := s.GetEmbedding(item.ID)
+		if err != nil {
+			t.Errorf("failed to get embedding for %s: %v", item.ID, err)
+		}
+		if emb == nil {
+			t.Errorf("expected embedding for %s to be saved", item.ID)
+		}
+	}
+}
+
+func TestCoordinatorEmbeddingWorkerRespectsContext(t *testing.T) {
+	// Setup
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("failed to open store: %v", err)
+	}
+	defer s.Close()
+
+	// Pre-populate store with items that need embedding
+	now := time.Now()
+	items := []store.Item{
+		{ID: "item1", SourceType: "rss", SourceName: "TestSource", Title: "Test 1", URL: "http://example.com/1", Published: now, Fetched: now},
+	}
+	_, err = s.SaveItems(items)
+	if err != nil {
+		t.Fatalf("failed to save items: %v", err)
+	}
+
+	// Create embedder that blocks until context is cancelled
+	embedStarted := make(chan struct{})
+	embedder := &mockEmbedder{
+		available: true,
+		embedFunc: func(ctx context.Context, text string) ([]float32, error) {
+			close(embedStarted)
+			<-ctx.Done() // Block until cancelled
+			return nil, ctx.Err()
+		},
+	}
+
+	sources := []fetch.Source{}
+	mock := &mockFetcher{}
+	coord := NewCoordinatorWithFetcher(s, mock, embedder, sources)
+
+	// Start embedding worker
+	ctx, cancel := context.WithCancel(context.Background())
+	coord.StartEmbeddingWorker(ctx)
+
+	// Wait for worker to complete with a timeout
+	done := make(chan struct{})
+	go func() {
+		coord.Wait()
+		close(done)
+	}()
+
+	// Cancel the context
+	cancel()
+
+	// Verify Wait returns quickly after cancellation
+	select {
+	case <-done:
+		// Success - worker stopped
+	case <-time.After(3 * time.Second):
+		t.Fatal("embedding worker did not stop after context cancellation")
+	}
+}
+
+// mockBatchEmbedder implements embed.BatchEmbedder for testing.
+type mockBatchEmbedder struct {
+	available      bool
+	embedFunc      func(ctx context.Context, text string) ([]float32, error)
+	embedBatchFunc func(ctx context.Context, texts []string) ([][]float32, error)
+}
+
+func (m *mockBatchEmbedder) Available() bool {
+	return m.available
+}
+
+func (m *mockBatchEmbedder) Embed(ctx context.Context, text string) ([]float32, error) {
+	if m.embedFunc != nil {
+		return m.embedFunc(ctx, text)
+	}
+	return []float32{0.1, 0.2, 0.3}, nil
+}
+
+func (m *mockBatchEmbedder) EmbedBatch(ctx context.Context, texts []string) ([][]float32, error) {
+	if m.embedBatchFunc != nil {
+		return m.embedBatchFunc(ctx, texts)
+	}
+	result := make([][]float32, len(texts))
+	for i := range texts {
+		result[i] = []float32{0.1, 0.2, 0.3}
+	}
+	return result, nil
+}
+
+func TestCoordinatorUsesBatchEmbedder(t *testing.T) {
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("failed to open store: %v", err)
+	}
+	defer s.Close()
+
+	sources := []fetch.Source{
+		{Type: "rss", Name: "TestSource", URL: "http://example.com/feed"},
+	}
+
+	now := time.Now()
+	testItems := []store.Item{
+		{ID: "item1", SourceType: "rss", SourceName: "TestSource", Title: "Test 1", URL: "http://example.com/1", Published: now, Fetched: now},
+		{ID: "item2", SourceType: "rss", SourceName: "TestSource", Title: "Test 2", URL: "http://example.com/2", Published: now, Fetched: now},
+		{ID: "item3", SourceType: "rss", SourceName: "TestSource", Title: "Test 3", URL: "http://example.com/3", Published: now, Fetched: now},
+	}
+
+	mock := &mockFetcher{returnItems: testItems}
+	var batchCalled bool
+	var batchTexts []string
+	embedder := &mockBatchEmbedder{
+		available: true,
+		embedBatchFunc: func(ctx context.Context, texts []string) ([][]float32, error) {
+			batchCalled = true
+			batchTexts = texts
+			result := make([][]float32, len(texts))
+			for i := range texts {
+				result[i] = []float32{0.1, 0.2, 0.3}
+			}
+			return result, nil
+		},
+	}
+	coord := NewCoordinatorWithFetcher(s, mock, embedder, sources)
+
+	ctx := context.Background()
+	coord.fetchAll(ctx, nil)
+
+	if !batchCalled {
+		t.Error("expected EmbedBatch to be called for BatchEmbedder")
+	}
+	if len(batchTexts) != 3 {
+		t.Errorf("expected 3 texts in batch, got %d", len(batchTexts))
+	}
+
+	// Verify all embeddings were saved
+	for _, item := range testItems {
+		emb, err := s.GetEmbedding(item.ID)
+		if err != nil {
+			t.Errorf("failed to get embedding for %s: %v", item.ID, err)
+		}
+		if emb == nil {
+			t.Errorf("expected embedding for %s", item.ID)
+		}
+	}
+}
+
+func TestCoordinatorBatchEmbedError(t *testing.T) {
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("failed to open store: %v", err)
+	}
+	defer s.Close()
+
+	sources := []fetch.Source{
+		{Type: "rss", Name: "TestSource", URL: "http://example.com/feed"},
+	}
+
+	now := time.Now()
+	testItems := []store.Item{
+		{ID: "item1", SourceType: "rss", SourceName: "TestSource", Title: "Test 1", URL: "http://example.com/1", Published: now, Fetched: now},
+		{ID: "item2", SourceType: "rss", SourceName: "TestSource", Title: "Test 2", URL: "http://example.com/2", Published: now, Fetched: now},
+	}
+
+	mock := &mockFetcher{returnItems: testItems}
+	embedder := &mockBatchEmbedder{
+		available: true,
+		embedBatchFunc: func(ctx context.Context, texts []string) ([][]float32, error) {
+			return nil, errors.New("batch embed failed")
+		},
+	}
+	coord := NewCoordinatorWithFetcher(s, mock, embedder, sources)
+
+	ctx := context.Background()
+	coord.fetchAll(ctx, nil)
+
+	// Verify no embeddings were saved
+	for _, item := range testItems {
+		emb, _ := s.GetEmbedding(item.ID)
+		if emb != nil {
+			t.Errorf("expected no embedding for %s after batch error", item.ID)
+		}
+	}
+}
+
+func TestCoordinatorEmbeddingWorkerSkipsWhenUnavailable(t *testing.T) {
+	// Setup
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("failed to open store: %v", err)
+	}
+	defer s.Close()
+
+	// Pre-populate store with items that need embedding
+	now := time.Now()
+	items := []store.Item{
+		{ID: "item1", SourceType: "rss", SourceName: "TestSource", Title: "Test 1", URL: "http://example.com/1", Published: now, Fetched: now},
+		{ID: "item2", SourceType: "rss", SourceName: "TestSource", Title: "Test 2", URL: "http://example.com/2", Published: now, Fetched: now},
+	}
+	_, err = s.SaveItems(items)
+	if err != nil {
+		t.Fatalf("failed to save items: %v", err)
+	}
+
+	// Create embedder that is not available
+	var embedCount atomic.Int32
+	embedder := &mockEmbedder{
+		available: false, // Not available
+		embedFunc: func(ctx context.Context, text string) ([]float32, error) {
+			embedCount.Add(1)
+			return []float32{0.1, 0.2, 0.3}, nil
+		},
+	}
+
+	sources := []fetch.Source{}
+	mock := &mockFetcher{}
+	coord := NewCoordinatorWithFetcher(s, mock, embedder, sources)
+
+	// Start embedding worker
+	ctx, cancel := context.WithCancel(context.Background())
+	coord.StartEmbeddingWorker(ctx)
+
+	// Wait for at least one worker cycle (worker runs every 2 seconds)
+	time.Sleep(3 * time.Second)
+
+	// Cancel and wait
+	cancel()
+	coord.Wait()
+
+	// Verify embed was NOT called since embedder is unavailable
+	count := embedCount.Load()
+	if count != 0 {
+		t.Errorf("expected 0 embed calls when unavailable, got %d", count)
+	}
+
+	// Verify no embeddings were saved
+	for _, item := range items {
+		emb, _ := s.GetEmbedding(item.ID)
+		if emb != nil {
+			t.Errorf("expected no embedding for %s when embedder unavailable", item.ID)
+		}
+	}
+}

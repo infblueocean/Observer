@@ -14,6 +14,15 @@ type Embedder interface {
 	Embed(ctx context.Context, text string) ([]float32, error)
 }
 
+// BatchEmbedder extends Embedder with batch embedding support.
+// Implementations can embed multiple texts in a single API call for efficiency.
+// When EmbedBatch returns nil error, the result slice must have the same length
+// as the input texts slice, with result[i] corresponding to texts[i].
+type BatchEmbedder interface {
+	Embedder
+	EmbedBatch(ctx context.Context, texts []string) ([][]float32, error)
+}
+
 // CosineSimilarity computes similarity between two embeddings.
 // Returns 1.0 for identical vectors, 0.0 for orthogonal vectors.
 // Returns 0.0 if vectors have different lengths or either is zero-length.

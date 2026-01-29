@@ -3,6 +3,7 @@ package coord
 
 import (
 	"context"
+	"log"
 	"sync"
 	"time"
 
@@ -26,6 +27,12 @@ const maxConcurrentFetches = 5
 
 // embedBatchSize is the max items to embed per fetch cycle.
 const embedBatchSize = 100
+
+// embedWorkerInterval is the time between embedding worker cycles.
+const embedWorkerInterval = 2 * time.Second
+
+// embedWorkerBatchSize is the number of items to embed per worker cycle.
+const embedWorkerBatchSize = 10
 
 // fetcher interface for dependency injection (testing).
 type fetcher interface {
@@ -94,6 +101,106 @@ func (c *Coordinator) Wait() {
 	c.wg.Wait()
 }
 
+// StartEmbeddingWorker starts a background worker that continuously embeds
+// items without embeddings. Processes items in small batches with delays
+// to avoid overwhelming Ollama. Use this for backfilling existing items.
+func (c *Coordinator) StartEmbeddingWorker(ctx context.Context) {
+	if c.embedder == nil {
+		return
+	}
+
+	c.wg.Add(1)
+	go func() {
+		defer c.wg.Done()
+
+		ticker := time.NewTicker(embedWorkerInterval)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				c.embedBatch(ctx, embedWorkerBatchSize)
+			}
+		}
+	}()
+}
+
+// embedBatch embeds up to limit items that need embeddings.
+// Returns early if embedder unavailable or context cancelled.
+func (c *Coordinator) embedBatch(ctx context.Context, limit int) {
+	if !c.embedder.Available() {
+		return
+	}
+
+	items, err := c.store.GetItemsNeedingEmbedding(limit)
+	if err != nil || len(items) == 0 {
+		return
+	}
+
+	c.embedItems(ctx, items)
+}
+
+// embedItems generates and saves embeddings for the given items.
+// Uses batch embedding if available, otherwise falls back to sequential.
+func (c *Coordinator) embedItems(ctx context.Context, items []store.Item) {
+	if len(items) == 0 {
+		return
+	}
+
+	// Batch path: single API call for all items
+	if batcher, ok := c.embedder.(embed.BatchEmbedder); ok {
+		texts := make([]string, len(items))
+		for i, item := range items {
+			texts[i] = item.Title
+			if item.Summary != "" {
+				texts[i] += " " + item.Summary
+			}
+		}
+		embeddings, err := batcher.EmbedBatch(ctx, texts)
+		if err != nil {
+			log.Printf("coord: batch embedding failed: %v", err)
+			return
+		}
+		for i, emb := range embeddings {
+			if ctx.Err() != nil {
+				return
+			}
+			if i < len(items) {
+				if err := c.store.SaveEmbedding(items[i].ID, emb); err != nil {
+					log.Printf("coord: failed to save embedding for %s: %v", items[i].ID, err)
+				}
+			}
+		}
+		return
+	}
+
+	// Sequential fallback (Ollama)
+	for _, item := range items {
+		if ctx.Err() != nil {
+			return
+		}
+		if !c.embedder.Available() {
+			return
+		}
+
+		text := item.Title
+		if item.Summary != "" {
+			text += " " + item.Summary
+		}
+
+		embedding, err := c.embedder.Embed(ctx, text)
+		if err != nil {
+			continue
+		}
+
+		if err := c.store.SaveEmbedding(item.ID, embedding); err != nil {
+			log.Printf("coord: failed to save embedding for %s: %v", item.ID, err)
+		}
+	}
+}
+
 // fetchAll fetches all sources in parallel, then embeds new items.
 // Each fetch has a 30-second timeout.
 // Sends ui.FetchComplete messages to the program (order non-deterministic).
@@ -156,28 +263,5 @@ func (c *Coordinator) embedNewItems(ctx context.Context) {
 		return
 	}
 
-	for _, item := range items {
-		if ctx.Err() != nil {
-			return
-		}
-
-		// Re-check availability (Ollama may have stopped)
-		if !c.embedder.Available() {
-			return
-		}
-
-		text := item.Title
-		if item.Summary != "" {
-			text += " " + item.Summary
-		}
-
-		embedding, err := c.embedder.Embed(ctx, text)
-		if err != nil {
-			// Skip failed embeds - don't stop the whole process
-			continue
-		}
-
-		// Ignore save errors - embedding is non-critical functionality
-		_ = c.store.SaveEmbedding(item.ID, embedding)
-	}
+	c.embedItems(ctx, items)
 }

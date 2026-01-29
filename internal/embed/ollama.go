@@ -81,8 +81,14 @@ func (e *OllamaEmbedder) Available() bool {
 	}
 
 	// Check if the configured model exists
+	// Handle both exact matches and matches without the tag suffix
+	// e.g., "mxbai-embed-large" should match "mxbai-embed-large:latest"
 	for _, model := range tagsResp.Models {
 		if model.Name == e.model {
+			return true
+		}
+		// Check if model name without tag matches (e.g., "model:latest" matches "model")
+		if model.Name == e.model+":latest" {
 			return true
 		}
 	}

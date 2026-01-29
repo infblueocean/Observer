@@ -1,6 +1,7 @@
 package filter
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -505,5 +506,286 @@ func TestSemanticDedupEmpty(t *testing.T) {
 	}
 	if len(result) != 0 {
 		t.Errorf("expected 0 items, got %d", len(result))
+	}
+}
+
+func TestRerankByQuery(t *testing.T) {
+	items := []store.Item{
+		{ID: "1", Title: "Go Programming Tutorial"},
+		{ID: "2", Title: "Python Basics"},
+		{ID: "3", Title: "JavaScript Guide"},
+		{ID: "4", Title: "Advanced Go Patterns"},
+	}
+
+	// Embeddings that simulate "Go" items being more similar to the query
+	embeddings := map[string][]float32{
+		"1": {1.0, 0.0, 0.0},   // Very similar to query
+		"2": {0.1, 0.9, 0.3},   // Low similarity
+		"3": {0.3, 0.3, 0.9},   // Medium similarity
+		"4": {0.95, 0.1, 0.0},  // Very similar to query
+	}
+
+	// Query embedding close to items 1 and 4
+	queryEmbedding := []float32{1.0, 0.0, 0.0}
+
+	result := RerankByQuery(items, embeddings, queryEmbedding)
+
+	if len(result) != 4 {
+		t.Fatalf("expected 4 items (all items returned), got %d", len(result))
+	}
+
+	// Items 1 and 4 should be at the top (highest similarity)
+	// Item 1 has similarity 1.0, Item 4 has similarity ~0.995
+	if result[0].ID != "1" {
+		t.Errorf("expected item 1 first (highest similarity), got %s", result[0].ID)
+	}
+	if result[1].ID != "4" {
+		t.Errorf("expected item 4 second (second highest similarity), got %s", result[1].ID)
+	}
+}
+
+func TestRerankByQueryNoEmbeddings(t *testing.T) {
+	items := []store.Item{
+		{ID: "1", Title: "First"},
+		{ID: "2", Title: "Second"},
+		{ID: "3", Title: "Third"},
+	}
+
+	// No embeddings available
+	embeddings := map[string][]float32{}
+
+	queryEmbedding := []float32{1.0, 0.0, 0.0}
+
+	result := RerankByQuery(items, embeddings, queryEmbedding)
+
+	if len(result) != 3 {
+		t.Fatalf("expected 3 items, got %d", len(result))
+	}
+
+	// Without embeddings, items should maintain original order
+	if result[0].ID != "1" || result[1].ID != "2" || result[2].ID != "3" {
+		t.Error("expected original order when no embeddings available")
+	}
+}
+
+func TestRerankByQueryMixedEmbeddings(t *testing.T) {
+	items := []store.Item{
+		{ID: "1", Title: "Has Embedding"},
+		{ID: "2", Title: "No Embedding"},
+		{ID: "3", Title: "Also Has Embedding"},
+		{ID: "4", Title: "Also No Embedding"},
+	}
+
+	// Only some items have embeddings
+	embeddings := map[string][]float32{
+		"1": {0.5, 0.5, 0.0},   // Medium similarity
+		"3": {1.0, 0.0, 0.0},   // High similarity
+	}
+
+	queryEmbedding := []float32{1.0, 0.0, 0.0}
+
+	result := RerankByQuery(items, embeddings, queryEmbedding)
+
+	if len(result) != 4 {
+		t.Fatalf("expected 4 items, got %d", len(result))
+	}
+
+	// Items with embeddings should come first, sorted by similarity
+	// Item 3 has highest similarity (1.0), then Item 1 (~0.71)
+	if result[0].ID != "3" {
+		t.Errorf("expected item 3 first (highest similarity), got %s", result[0].ID)
+	}
+	if result[1].ID != "1" {
+		t.Errorf("expected item 1 second (second highest similarity), got %s", result[1].ID)
+	}
+
+	// Items without embeddings should be at the end
+	// They should maintain their relative original order
+	noEmbedItems := result[2:]
+	hasItem2 := false
+	hasItem4 := false
+	for _, item := range noEmbedItems {
+		if item.ID == "2" {
+			hasItem2 = true
+		}
+		if item.ID == "4" {
+			hasItem4 = true
+		}
+	}
+	if !hasItem2 || !hasItem4 {
+		t.Error("items without embeddings should be at the end")
+	}
+}
+
+func TestRerankByQueryEmptyQuery(t *testing.T) {
+	items := []store.Item{
+		{ID: "1", Title: "First"},
+		{ID: "2", Title: "Second"},
+	}
+
+	embeddings := map[string][]float32{
+		"1": {1.0, 0.0},
+		"2": {0.0, 1.0},
+	}
+
+	// Empty query embedding
+	result := RerankByQuery(items, embeddings, []float32{})
+
+	// Should return items unchanged
+	if len(result) != 2 {
+		t.Fatalf("expected 2 items, got %d", len(result))
+	}
+	if result[0].ID != "1" || result[1].ID != "2" {
+		t.Error("expected original order with empty query embedding")
+	}
+
+	// Nil query embedding
+	result = RerankByQuery(items, embeddings, nil)
+	if len(result) != 2 {
+		t.Fatalf("expected 2 items, got %d", len(result))
+	}
+}
+
+func TestRerankByQueryEmptyItems(t *testing.T) {
+	embeddings := map[string][]float32{}
+	queryEmbedding := []float32{1.0, 0.0, 0.0}
+
+	result := RerankByQuery([]store.Item{}, embeddings, queryEmbedding)
+	if len(result) != 0 {
+		t.Errorf("expected 0 items, got %d", len(result))
+	}
+
+	result = RerankByQuery(nil, embeddings, queryEmbedding)
+	if result != nil {
+		t.Error("expected nil for nil input")
+	}
+}
+
+// mockReranker implements Reranker for testing.
+type mockReranker struct {
+	available bool
+	scores    []Score
+	err       error
+}
+
+func (m *mockReranker) Available() bool {
+	return m.available
+}
+
+func (m *mockReranker) Rerank(ctx context.Context, query string, documents []string) ([]Score, error) {
+	if m.err != nil {
+		return nil, m.err
+	}
+	return m.scores, nil
+}
+
+func TestRerankByCrossEncoder(t *testing.T) {
+	now := time.Now()
+	items := []store.Item{
+		{ID: "1", Title: "Football game today", Published: now},
+		{ID: "2", Title: "Stock market rally", Published: now},
+		{ID: "3", Title: "Super Bowl preview", Published: now},
+		{ID: "4", Title: "Weather forecast", Published: now},
+	}
+
+	reranker := &mockReranker{
+		available: true,
+		scores: []Score{
+			{Index: 0, Score: 0.3},  // Football - medium relevant
+			{Index: 1, Score: 0.1},  // Stock - not relevant
+			{Index: 2, Score: 0.9},  // Super Bowl - highly relevant
+			{Index: 3, Score: 0.05}, // Weather - not relevant
+		},
+	}
+
+	ctx := context.Background()
+	result := RerankByCrossEncoder(ctx, items, "super bowl", reranker)
+
+	if len(result) != 4 {
+		t.Fatalf("expected 4 items, got %d", len(result))
+	}
+
+	// Super Bowl should be first (highest score)
+	if result[0].ID != "3" {
+		t.Errorf("expected Super Bowl (id=3) first, got %s", result[0].ID)
+	}
+
+	// Football should be second
+	if result[1].ID != "1" {
+		t.Errorf("expected Football (id=1) second, got %s", result[1].ID)
+	}
+}
+
+func TestRerankByCrossEncoderUnavailable(t *testing.T) {
+	items := []store.Item{
+		{ID: "1", Title: "Item 1"},
+		{ID: "2", Title: "Item 2"},
+	}
+
+	reranker := &mockReranker{
+		available: false,
+	}
+
+	ctx := context.Background()
+	result := RerankByCrossEncoder(ctx, items, "query", reranker)
+
+	// Should return items unchanged
+	if len(result) != 2 {
+		t.Fatalf("expected 2 items, got %d", len(result))
+	}
+	if result[0].ID != "1" || result[1].ID != "2" {
+		t.Error("expected items to be returned unchanged")
+	}
+}
+
+func TestRerankByCrossEncoderNilReranker(t *testing.T) {
+	items := []store.Item{
+		{ID: "1", Title: "Item 1"},
+	}
+
+	ctx := context.Background()
+	result := RerankByCrossEncoder(ctx, items, "query", nil)
+
+	// Should return items unchanged
+	if len(result) != 1 || result[0].ID != "1" {
+		t.Error("expected items to be returned unchanged with nil reranker")
+	}
+}
+
+func TestRerankByCrossEncoderEmpty(t *testing.T) {
+	reranker := &mockReranker{available: true}
+	ctx := context.Background()
+
+	result := RerankByCrossEncoder(ctx, []store.Item{}, "query", reranker)
+	if len(result) != 0 {
+		t.Errorf("expected 0 items, got %d", len(result))
+	}
+
+	result = RerankByCrossEncoder(ctx, nil, "query", reranker)
+	if result != nil {
+		t.Error("expected nil for nil input")
+	}
+}
+
+func TestRerankByCrossEncoderError(t *testing.T) {
+	items := []store.Item{
+		{ID: "1", Title: "Item 1"},
+		{ID: "2", Title: "Item 2"},
+	}
+
+	reranker := &mockReranker{
+		available: true,
+		err:       context.DeadlineExceeded,
+	}
+
+	ctx := context.Background()
+	result := RerankByCrossEncoder(ctx, items, "query", reranker)
+
+	// Should return items unchanged on error
+	if len(result) != 2 {
+		t.Fatalf("expected 2 items, got %d", len(result))
+	}
+	if result[0].ID != "1" || result[1].ID != "2" {
+		t.Error("expected items to be returned unchanged on error")
 	}
 }

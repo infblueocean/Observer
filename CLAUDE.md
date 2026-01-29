@@ -37,9 +37,53 @@ go test -run TestName ./path/to/package
 
 ## Architecture
 
-This is a greenfield project. Architecture will be documented as it develops.
+### Package Structure
 
-Reference the archived v0.4 CLAUDE.md at `archive/v0.4/CLAUDE.md` for historical context on previous architecture decisions, but do not assume that architecture applies to new development.
+```
+cmd/observer/       Main entry point — wires dependencies, starts TUI
+cmd/backfill/       Standalone CLI to backfill Jina embeddings in the database
+internal/coord/     Coordinator — background fetch + embedding pipeline
+internal/embed/     Embedder interface + Jina API and Ollama implementations
+internal/fetch/     RSS/source fetching
+internal/filter/    Item filtering, dedup, and reranking by embedding similarity
+internal/rerank/    Reranker interface + Jina API and Ollama implementations
+internal/store/     SQLite store (items, embeddings, read state)
+internal/ui/        Bubble Tea TUI (App model, messages, styles, stream rendering)
+```
+
+### Embedding & Reranking Pipeline
+
+Observer supports two backends for AI features, selected by the `JINA_API_KEY` environment variable:
+
+**Jina API (preferred):** Set `JINA_API_KEY` to enable. Uses `jina-embeddings-v3` for embeddings and `jina-reranker-v3` for reranking. Batch APIs for efficiency. Rate-limited to ~80 RPM with retry on 429/5xx.
+
+**Ollama (fallback):** When no Jina key is set, uses local Ollama with `mxbai-embed-large` for embeddings and cross-encoder prompting for reranking. Sequential, one item at a time.
+
+Key interfaces:
+- `embed.Embedder` — `Available()`, `Embed(ctx, text)`
+- `embed.BatchEmbedder` — extends Embedder with `EmbedBatch(ctx, texts)`
+- `rerank.Reranker` — `Available()`, `Rerank(ctx, query, docs)`
+
+The coordinator detects `BatchEmbedder` at runtime and uses batch calls when available. The UI detects batch reranking via the `BatchRerank` callback and shows a spinner instead of per-entry progress.
+
+### Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `JINA_API_KEY` | (none) | Jina AI API key. Enables Jina embeddings + reranking. |
+| `JINA_EMBED_MODEL` | `jina-embeddings-v3` | Jina embedding model name. |
+| `JINA_RERANK_MODEL` | `jina-reranker-v3` | Jina reranking model name. |
+
+### Backfill Tool
+
+When switching from Ollama to Jina embeddings, existing embeddings are incompatible. Run the backfill tool to re-embed:
+
+```bash
+source ~/src/claude/keys.sh  # or export JINA_API_KEY=...
+go run ./cmd/backfill
+```
+
+The tool is idempotent — it only processes items with NULL embeddings. First run prompts to clear old embeddings; subsequent runs resume from where they left off.
 
 ## Workflow Requirements
 

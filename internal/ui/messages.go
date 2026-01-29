@@ -5,8 +5,9 @@ import "github.com/abelbrown/observer/internal/store"
 
 // ItemsLoaded is sent when items are fetched from the store.
 type ItemsLoaded struct {
-	Items []store.Item
-	Err   error
+	Items      []store.Item
+	Embeddings map[string][]float32
+	Err        error
 }
 
 // ItemMarkedRead is sent when an item is marked as read.
@@ -23,3 +24,26 @@ type FetchComplete struct {
 
 // RefreshTick triggers periodic refresh.
 type RefreshTick struct{}
+
+// QueryEmbedded is sent when a filter query has been embedded.
+type QueryEmbedded struct {
+	Query     string
+	Embedding []float32
+	Err       error
+}
+
+// EntryReranked is sent when a single entry has been scored by the cross-encoder.
+// Used for package-manager style progress feedback.
+type EntryReranked struct {
+	Index int     // Index into the reranking batch
+	Score float32 // Relevance score in [0, 1]
+	Err   error
+}
+
+// RerankComplete is sent when batch reranking finishes (Jina API path).
+// Contains all scores at once, unlike EntryReranked which arrives one at a time.
+type RerankComplete struct {
+	Query  string    // query that was reranked (for stale-check)
+	Scores []float32 // score per entry, indexed by rerankEntries position
+	Err    error
+}
