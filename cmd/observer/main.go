@@ -13,7 +13,7 @@ import (
 	"github.com/abelbrown/observer/internal/embed"
 	"github.com/abelbrown/observer/internal/fetch"
 	"github.com/abelbrown/observer/internal/filter"
-	rerankpkg "github.com/abelbrown/observer/internal/rerank"
+	"github.com/abelbrown/observer/internal/rerank"
 	"github.com/abelbrown/observer/internal/store"
 	"github.com/abelbrown/observer/internal/ui"
 )
@@ -55,21 +55,14 @@ func main() {
 	embedModel := envOrDefault("JINA_EMBED_MODEL", "jina-embeddings-v3")
 	rerankModel := envOrDefault("JINA_RERANK_MODEL", "jina-reranker-v3")
 
-	// Embedder: prefer Jina API, fall back to Ollama
+	// Embedder and reranker: Jina API only (Ollama disabled)
 	var embedder embed.Embedder
+	var jinaReranker *rerank.JinaReranker
 	if jinaKey != "" {
 		embedder = embed.NewJinaEmbedder(jinaKey, embedModel)
+		jinaReranker = rerank.NewJinaReranker(jinaKey, rerankModel)
 	} else {
-		embedder = embed.NewOllamaEmbedder("http://localhost:11434", "mxbai-embed-large")
-	}
-
-	// Reranker: prefer Jina batch reranking, fall back to Ollama per-entry scoring
-	var ollamaReranker *rerankpkg.OllamaReranker
-	var jinaReranker *rerankpkg.JinaReranker
-	if jinaKey != "" {
-		jinaReranker = rerankpkg.NewJinaReranker(jinaKey, rerankModel)
-	} else {
-		ollamaReranker = rerankpkg.NewOllamaReranker("http://localhost:11434", "")
+		log.Println("Warning: JINA_API_KEY not set — embeddings and reranking disabled")
 	}
 
 	// Default sources (can be made configurable later)
@@ -131,10 +124,9 @@ func main() {
 			}
 		},
 		// embedQuery: embed a query string for semantic search
-		// Uses EmbedQuery() for Jina (retrieval.query task type) for better search quality
 		EmbedQuery: func(query string) tea.Cmd {
 			return func() tea.Msg {
-				if !embedder.Available() {
+				if embedder == nil || !embedder.Available() {
 					return ui.QueryEmbedded{Query: query, Err: nil}
 				}
 				type queryEmbedder interface {
@@ -146,16 +138,6 @@ func main() {
 				}
 				embedding, err := embedder.Embed(ctx, query)
 				return ui.QueryEmbedded{Query: query, Embedding: embedding, Err: err}
-			}
-		},
-		// scoreEntry: score a single entry using cross-encoder (Ollama path only)
-		ScoreEntry: func(query string, doc string, index int) tea.Cmd {
-			return func() tea.Msg {
-				if ollamaReranker == nil || !ollamaReranker.Available() {
-					return ui.EntryReranked{Index: index, Score: 0.5, Err: nil}
-				}
-				score, err := ollamaReranker.ScoreOne(ctx, query, doc)
-				return ui.EntryReranked{Index: index, Score: score, Err: err}
 			}
 		},
 	}
