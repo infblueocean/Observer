@@ -7,6 +7,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"golang.org/x/sync/errgroup"
 
 	"github.com/abelbrown/observer/internal/embed"
 	"github.com/abelbrown/observer/internal/fetch"
@@ -19,6 +20,9 @@ const fetchInterval = 5 * time.Minute
 
 // fetchTimeout is the timeout for each individual fetch.
 const fetchTimeout = 30 * time.Second
+
+// maxConcurrentFetches limits parallel fetch operations.
+const maxConcurrentFetches = 5
 
 // embedBatchSize is the max items to embed per fetch cycle.
 const embedBatchSize = 100
@@ -90,45 +94,54 @@ func (c *Coordinator) Wait() {
 	c.wg.Wait()
 }
 
-// fetchAll fetches all sources sequentially, then embeds new items.
+// fetchAll fetches all sources in parallel, then embeds new items.
 // Each fetch has a 30-second timeout.
-// Sends ui.FetchComplete messages to the program.
+// Sends ui.FetchComplete messages to the program (order non-deterministic).
 func (c *Coordinator) fetchAll(ctx context.Context, program *tea.Program) {
+	var g errgroup.Group
+	g.SetLimit(maxConcurrentFetches)
+
 	for _, src := range c.sources {
-		// Check context before each fetch
-		if ctx.Err() != nil {
-			return
-		}
-
-		// Create timeout context for this fetch
-		fetchCtx, cancel := context.WithTimeout(ctx, fetchTimeout)
-
-		// Perform fetch
-		items, err := c.fetcher.Fetch(fetchCtx, src)
-		cancel() // Always cancel to release resources
-
-		// Save items if fetch succeeded
-		var saveErr error
-		newItems := 0
-		if err == nil && len(items) > 0 {
-			newItems, saveErr = c.store.SaveItems(items)
-			// Note: saveErr is logged but not propagated - fetch succeeded,
-			// partial save failure is non-critical for a news reader
-			_ = saveErr // intentionally ignored, store errors are rare
-		}
-
-		// Send completion message (handle nil program gracefully for testing)
-		if program != nil {
-			program.Send(ui.FetchComplete{
-				Source:   src.Name,
-				NewItems: newItems,
-				Err:      err,
-			})
-		}
+		g.Go(func() error {
+			// Early exit if context cancelled
+			if ctx.Err() != nil {
+				return nil
+			}
+			c.fetchSource(ctx, src, program)
+			return nil // never fail the group - errors reported per-source
+		})
 	}
+
+	_ = g.Wait() // All goroutines return nil, but explicit discard for clarity
 
 	// After all fetches, embed new items (if embedder available)
 	c.embedNewItems(ctx)
+}
+
+// fetchSource fetches a single source with timeout.
+// Sends ui.FetchComplete message when done.
+func (c *Coordinator) fetchSource(ctx context.Context, src fetch.Source, program *tea.Program) {
+	fetchCtx, cancel := context.WithTimeout(ctx, fetchTimeout)
+	defer cancel()
+
+	items, err := c.fetcher.Fetch(fetchCtx, src)
+
+	// Save items if fetch succeeded
+	newItems := 0
+	if err == nil && len(items) > 0 {
+		var saveErr error
+		newItems, saveErr = c.store.SaveItems(items)
+		_ = saveErr // intentionally ignored - fetch succeeded, save errors are rare
+	}
+
+	// Send completion message (handle nil program gracefully for testing)
+	if program != nil {
+		program.Send(ui.FetchComplete{
+			Source:   src.Name,
+			NewItems: newItems,
+			Err:      err,
+		})
+	}
 }
 
 // embedNewItems generates embeddings for items that don't have one.

@@ -3,6 +3,7 @@ package coord
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -70,16 +71,27 @@ func TestCoordinatorFetchesAllSources(t *testing.T) {
 	ctx := context.Background()
 	coord.fetchAll(ctx, nil)
 
-	// Verify all sources were fetched in order
+	// Verify all sources were fetched (order not guaranteed with parallel fetch)
 	fetched := mock.getFetchedSources()
 	if len(fetched) != len(sources) {
 		t.Errorf("expected %d sources fetched, got %d", len(sources), len(fetched))
 	}
 
-	for i, src := range sources {
-		if fetched[i].Name != src.Name {
-			t.Errorf("source %d: expected %q, got %q", i, src.Name, fetched[i].Name)
+	// Build set of expected source names
+	expected := make(map[string]bool)
+	for _, src := range sources {
+		expected[src.Name] = true
+	}
+
+	// Verify all expected sources were fetched
+	for _, src := range fetched {
+		if !expected[src.Name] {
+			t.Errorf("unexpected source fetched: %q", src.Name)
 		}
+		delete(expected, src.Name)
+	}
+	for name := range expected {
+		t.Errorf("source not fetched: %q", name)
 	}
 }
 
@@ -297,8 +309,21 @@ func TestCoordinatorSourcesImmutable(t *testing.T) {
 		t.Errorf("expected 2 sources, got %d", len(fetched))
 	}
 
-	if fetched[0].Name != "Source1" {
-		t.Errorf("expected first source to be 'Source1', got %q", fetched[0].Name)
+	// Check that Source1 was fetched (not "Modified")
+	foundSource1 := false
+	for _, src := range fetched {
+		if src.Name == "Source1" {
+			foundSource1 = true
+		}
+		if src.Name == "Modified" {
+			t.Error("coordinator used modified source name")
+		}
+		if src.Name == "Source3" {
+			t.Error("coordinator used appended source")
+		}
+	}
+	if !foundSource1 {
+		t.Error("Source1 was not fetched")
 	}
 }
 
@@ -317,11 +342,11 @@ func TestCoordinatorSendsFetchCompleteMessages(t *testing.T) {
 
 	testErr := errors.New("fetch error")
 
-	// Create mock that succeeds for first source, fails for second
-	callCount := 0
+	// Create mock that succeeds for GoodSource, fails for BadSource
+	var callCount atomic.Int32
 	customFetcher := &customMockFetcher{
 		fetchFunc: func(ctx context.Context, src fetch.Source) ([]store.Item, error) {
-			callCount++
+			callCount.Add(1)
 			if src.Name == "BadSource" {
 				return nil, testErr
 			}
@@ -343,8 +368,8 @@ func TestCoordinatorSendsFetchCompleteMessages(t *testing.T) {
 	ctx := context.Background()
 	coord.fetchAll(ctx, nil)
 
-	if callCount != 2 {
-		t.Errorf("expected 2 fetch calls, got %d", callCount)
+	if callCount.Load() != 2 {
+		t.Errorf("expected 2 fetch calls, got %d", callCount.Load())
 	}
 }
 
@@ -396,13 +421,13 @@ func TestCoordinatorHandlesFetchError(t *testing.T) {
 		{Type: "rss", Name: "GoodSource", URL: "http://example.com/good"},
 	}
 
-	// Create mock that fails for first source
+	// Create mock that fails for ErrorSource, succeeds for GoodSource
 	testErr := errors.New("fetch failed")
-	callIdx := 0
+	var callCount atomic.Int32
 	customFetcher := &customMockFetcher{
 		fetchFunc: func(ctx context.Context, src fetch.Source) ([]store.Item, error) {
-			callIdx++
-			if callIdx == 1 {
+			callCount.Add(1)
+			if src.Name == "ErrorSource" {
 				return nil, testErr
 			}
 			return []store.Item{{
@@ -423,9 +448,9 @@ func TestCoordinatorHandlesFetchError(t *testing.T) {
 	ctx := context.Background()
 	coord.fetchAll(ctx, nil)
 
-	// Verify both sources were attempted (error doesn't stop iteration)
-	if callIdx != 2 {
-		t.Errorf("expected 2 fetch calls despite error, got %d", callIdx)
+	// Verify both sources were attempted (error doesn't stop other fetches)
+	if callCount.Load() != 2 {
+		t.Errorf("expected 2 fetch calls despite error, got %d", callCount.Load())
 	}
 
 	// Verify only second source's items were saved
@@ -764,4 +789,131 @@ func (m *mockEmbedderWithDynamicAvailable) Embed(ctx context.Context, text strin
 		return m.embedFunc(ctx, text)
 	}
 	return []float32{0.1, 0.2, 0.3}, nil
+}
+
+func TestCoordinatorFetchesInParallel(t *testing.T) {
+	// Setup
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("failed to open store: %v", err)
+	}
+	defer s.Close()
+
+	sources := []fetch.Source{
+		{Type: "rss", Name: "Source1", URL: "http://example.com/1"},
+		{Type: "rss", Name: "Source2", URL: "http://example.com/2"},
+		{Type: "rss", Name: "Source3", URL: "http://example.com/3"},
+	}
+
+	// Use channels to prove parallelism:
+	// Each fetch signals it started, then waits for permission to continue.
+	// We'll wait until all 3 have started before releasing them.
+	started := make(chan struct{}, 3)
+	proceed := make(chan struct{})
+
+	customFetcher := &customMockFetcher{
+		fetchFunc: func(ctx context.Context, src fetch.Source) ([]store.Item, error) {
+			started <- struct{}{} // Signal that this fetch started
+			<-proceed             // Wait for permission to continue
+			return []store.Item{}, nil
+		},
+	}
+
+	coord := NewCoordinatorWithFetcher(s, customFetcher, nil, sources)
+
+	// Run fetchAll in a goroutine
+	done := make(chan struct{})
+	go func() {
+		coord.fetchAll(context.Background(), nil)
+		close(done)
+	}()
+
+	// Wait for all 3 fetches to start (proves they're running in parallel)
+	for i := 0; i < 3; i++ {
+		select {
+		case <-started:
+			// Good, another fetch started
+		case <-time.After(2 * time.Second):
+			t.Fatalf("timeout waiting for fetch %d to start - not running in parallel", i+1)
+		}
+	}
+
+	// All 3 started concurrently - release them
+	close(proceed)
+
+	// Wait for fetchAll to complete
+	select {
+	case <-done:
+		// Success
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for fetchAll to complete")
+	}
+}
+
+func TestCoordinatorParallelRespectsLimit(t *testing.T) {
+	// Setup
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("failed to open store: %v", err)
+	}
+	defer s.Close()
+
+	// Create more sources than the concurrency limit (5)
+	sources := make([]fetch.Source, 10)
+	for i := 0; i < 10; i++ {
+		sources[i] = fetch.Source{Type: "rss", Name: fmt.Sprintf("Source%d", i), URL: fmt.Sprintf("http://example.com/%d", i)}
+	}
+
+	// Track max concurrent fetches
+	var current atomic.Int32
+	var maxConcurrent atomic.Int32
+	proceed := make(chan struct{})
+
+	customFetcher := &customMockFetcher{
+		fetchFunc: func(ctx context.Context, src fetch.Source) ([]store.Item, error) {
+			n := current.Add(1)
+			// Update max if this is a new high
+			for {
+				old := maxConcurrent.Load()
+				if n <= old || maxConcurrent.CompareAndSwap(old, n) {
+					break
+				}
+			}
+			<-proceed // Wait for signal
+			current.Add(-1)
+			return []store.Item{}, nil
+		},
+	}
+
+	coord := NewCoordinatorWithFetcher(s, customFetcher, nil, sources)
+
+	// Run fetchAll in a goroutine
+	done := make(chan struct{})
+	go func() {
+		coord.fetchAll(context.Background(), nil)
+		close(done)
+	}()
+
+	// Wait a bit for goroutines to pile up at the limit
+	time.Sleep(100 * time.Millisecond)
+
+	// Release all fetches
+	close(proceed)
+
+	// Wait for completion
+	select {
+	case <-done:
+		// Success
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for fetchAll to complete")
+	}
+
+	// Verify max concurrent was at most 5 (the limit) but at least 2 (parallelism happened)
+	max := maxConcurrent.Load()
+	if max > 5 {
+		t.Errorf("max concurrent fetches was %d, expected at most 5", max)
+	}
+	if max < 2 {
+		t.Errorf("max concurrent fetches was %d, expected at least 2 to prove parallelism", max)
+	}
 }
