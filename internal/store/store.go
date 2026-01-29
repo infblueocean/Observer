@@ -3,7 +3,10 @@ package store
 
 import (
 	"database/sql"
+	"encoding/binary"
 	"fmt"
+	"math"
+	"strings"
 	"sync"
 	"time"
 
@@ -76,6 +79,11 @@ func Open(dbPath string) (*Store, error) {
 		return nil, fmt.Errorf("create tables: %w", err)
 	}
 
+	if err := s.migrateEmbeddings(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate embeddings: %w", err)
+	}
+
 	return s, nil
 }
 
@@ -135,7 +143,7 @@ func (s *Store) SaveItems(items []Item) (int, error) {
 		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`)
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("prepare insert: %w", err)
 	}
 	defer stmt.Close()
 
@@ -229,7 +237,10 @@ func (s *Store) MarkRead(id string) error {
 	defer s.mu.Unlock()
 
 	_, err := s.db.Exec("UPDATE items SET read = 1 WHERE id = ?", id)
-	return err
+	if err != nil {
+		return fmt.Errorf("mark read %s: %w", id, err)
+	}
+	return nil
 }
 
 // MarkSaved toggles the saved state of an item.
@@ -239,7 +250,10 @@ func (s *Store) MarkSaved(id string, saved bool) error {
 	defer s.mu.Unlock()
 
 	_, err := s.db.Exec("UPDATE items SET saved = ? WHERE id = ?", boolToInt(saved), id)
-	return err
+	if err != nil {
+		return fmt.Errorf("mark saved %s: %w", id, err)
+	}
+	return nil
 }
 
 // queryItems is a helper that executes a query and scans results into Items.
@@ -289,4 +303,158 @@ func boolToInt(b bool) int {
 		return 1
 	}
 	return 0
+}
+
+// migrateEmbeddings adds the embedding column and index if they don't exist.
+func (s *Store) migrateEmbeddings() error {
+	// Check if column exists using pragma_table_info
+	var count int
+	err := s.db.QueryRow(`
+		SELECT COUNT(*) FROM pragma_table_info('items')
+		WHERE name = 'embedding'
+	`).Scan(&count)
+	if err != nil {
+		return err
+	}
+
+	if count == 0 {
+		_, err = s.db.Exec(`ALTER TABLE items ADD COLUMN embedding BLOB DEFAULT NULL`)
+		if err != nil {
+			return fmt.Errorf("add embedding column: %w", err)
+		}
+	}
+
+	// Create partial index (IF NOT EXISTS is idempotent)
+	_, err = s.db.Exec(`
+		CREATE INDEX IF NOT EXISTS idx_items_no_embedding
+		ON items(id) WHERE embedding IS NULL
+	`)
+	return err
+}
+
+// SaveEmbedding stores an embedding for an item.
+// Thread-safe: acquires write lock.
+func (s *Store) SaveEmbedding(id string, embedding []float32) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	data := encodeEmbedding(embedding)
+	_, err := s.db.Exec("UPDATE items SET embedding = ? WHERE id = ?", data, id)
+	if err != nil {
+		return fmt.Errorf("save embedding for %s: %w", id, err)
+	}
+	return nil
+}
+
+// GetItemsNeedingEmbedding returns items with NULL embedding.
+// Returns oldest items first (by fetched_at) up to limit.
+// Thread-safe: acquires read lock.
+func (s *Store) GetItemsNeedingEmbedding(limit int) ([]Item, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	query := `
+		SELECT id, source_type, source_name, title, summary, url, author,
+			published_at, fetched_at, read, saved
+		FROM items
+		WHERE embedding IS NULL
+		ORDER BY fetched_at ASC
+		LIMIT ?
+	`
+
+	return s.queryItems(query, limit)
+}
+
+// GetEmbedding returns the embedding for an item, or nil if not set.
+// Thread-safe: acquires read lock.
+func (s *Store) GetEmbedding(id string) ([]float32, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var data []byte
+	err := s.db.QueryRow("SELECT embedding FROM items WHERE id = ?", id).Scan(&data)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if data == nil {
+		return nil, nil
+	}
+	return decodeEmbedding(data), nil
+}
+
+// GetItemsWithEmbeddings returns embeddings for given item IDs.
+// Thread-safe: acquires read lock.
+func (s *Store) GetItemsWithEmbeddings(ids []string) (map[string][]float32, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if len(ids) == 0 {
+		return make(map[string][]float32), nil
+	}
+
+	result := make(map[string][]float32)
+
+	// Build query with placeholders
+	query := "SELECT id, embedding FROM items WHERE id IN (?" + repeatString(",?", len(ids)-1) + ") AND embedding IS NOT NULL"
+
+	args := make([]any, len(ids))
+	for i, id := range ids {
+		args[i] = id
+	}
+
+	rows, err := s.db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var id string
+		var data []byte
+		if err := rows.Scan(&id, &data); err != nil {
+			return nil, err
+		}
+		if data != nil {
+			result[id] = decodeEmbedding(data)
+		}
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	return result, nil
+}
+
+// encodeEmbedding converts a float32 slice to bytes using little-endian encoding.
+func encodeEmbedding(embedding []float32) []byte {
+	data := make([]byte, len(embedding)*4)
+	for i, v := range embedding {
+		binary.LittleEndian.PutUint32(data[i*4:], math.Float32bits(v))
+	}
+	return data
+}
+
+// decodeEmbedding converts bytes to a float32 slice using little-endian encoding.
+func decodeEmbedding(data []byte) []float32 {
+	if len(data) == 0 {
+		return nil
+	}
+	embedding := make([]float32, len(data)/4)
+	for i := range embedding {
+		bits := binary.LittleEndian.Uint32(data[i*4:])
+		embedding[i] = math.Float32frombits(bits)
+	}
+	return embedding
+}
+
+// repeatString returns s repeated n times.
+func repeatString(s string, n int) string {
+	if n <= 0 {
+		return ""
+	}
+	return strings.Repeat(s, n)
 }

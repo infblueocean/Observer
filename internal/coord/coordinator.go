@@ -8,6 +8,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/abelbrown/observer/internal/embed"
 	"github.com/abelbrown/observer/internal/fetch"
 	"github.com/abelbrown/observer/internal/store"
 	"github.com/abelbrown/observer/internal/ui"
@@ -19,35 +20,42 @@ const fetchInterval = 5 * time.Minute
 // fetchTimeout is the timeout for each individual fetch.
 const fetchTimeout = 30 * time.Second
 
+// embedBatchSize is the max items to embed per fetch cycle.
+const embedBatchSize = 100
+
 // fetcher interface for dependency injection (testing).
 type fetcher interface {
 	Fetch(ctx context.Context, src fetch.Source) ([]store.Item, error)
 }
 
-// Coordinator manages background fetching.
+// Coordinator manages background fetching and embedding.
 // Uses context cancellation as the ONLY stop mechanism.
 type Coordinator struct {
-	store   *store.Store
-	fetcher fetcher               // interface for testing
-	sources []fetch.Source        // IMMUTABLE: set at construction, never modified
-	wg      sync.WaitGroup
+	store    *store.Store
+	fetcher  fetcher               // interface for testing
+	embedder embed.Embedder        // optional: nil to disable embedding
+	sources  []fetch.Source        // IMMUTABLE: set at construction, never modified
+	wg       sync.WaitGroup
 }
 
 // NewCoordinator creates a Coordinator with the real fetcher.
-func NewCoordinator(s *store.Store, f *fetch.Fetcher, sources []fetch.Source) *Coordinator {
-	return NewCoordinatorWithFetcher(s, f, sources)
+// The embedder is optional (nil to disable embedding).
+func NewCoordinator(s *store.Store, f *fetch.Fetcher, e embed.Embedder, sources []fetch.Source) *Coordinator {
+	return NewCoordinatorWithFetcher(s, f, e, sources)
 }
 
 // NewCoordinatorWithFetcher allows injecting a custom fetcher (for testing).
-func NewCoordinatorWithFetcher(s *store.Store, f fetcher, sources []fetch.Source) *Coordinator {
+// The embedder is optional (nil to disable embedding).
+func NewCoordinatorWithFetcher(s *store.Store, f fetcher, e embed.Embedder, sources []fetch.Source) *Coordinator {
 	// Copy sources slice to ensure immutability
 	sourcesCopy := make([]fetch.Source, len(sources))
 	copy(sourcesCopy, sources)
 
 	return &Coordinator{
-		store:   s,
-		fetcher: f,
-		sources: sourcesCopy,
+		store:    s,
+		fetcher:  f,
+		embedder: e,
+		sources:  sourcesCopy,
 	}
 }
 
@@ -82,7 +90,7 @@ func (c *Coordinator) Wait() {
 	c.wg.Wait()
 }
 
-// fetchAll fetches all sources sequentially.
+// fetchAll fetches all sources sequentially, then embeds new items.
 // Each fetch has a 30-second timeout.
 // Sends ui.FetchComplete messages to the program.
 func (c *Coordinator) fetchAll(ctx context.Context, program *tea.Program) {
@@ -117,5 +125,46 @@ func (c *Coordinator) fetchAll(ctx context.Context, program *tea.Program) {
 				Err:      err,
 			})
 		}
+	}
+
+	// After all fetches, embed new items (if embedder available)
+	c.embedNewItems(ctx)
+}
+
+// embedNewItems generates embeddings for items that don't have one.
+// Skips silently if embedder is nil or unavailable.
+func (c *Coordinator) embedNewItems(ctx context.Context) {
+	if c.embedder == nil || !c.embedder.Available() {
+		return
+	}
+
+	items, err := c.store.GetItemsNeedingEmbedding(embedBatchSize)
+	if err != nil || len(items) == 0 {
+		return
+	}
+
+	for _, item := range items {
+		if ctx.Err() != nil {
+			return
+		}
+
+		// Re-check availability (Ollama may have stopped)
+		if !c.embedder.Available() {
+			return
+		}
+
+		text := item.Title
+		if item.Summary != "" {
+			text += " " + item.Summary
+		}
+
+		embedding, err := c.embedder.Embed(ctx, text)
+		if err != nil {
+			// Skip failed embeds - don't stop the whole process
+			continue
+		}
+
+		// Ignore save errors - embedding is non-critical functionality
+		_ = c.store.SaveEmbedding(item.ID, embedding)
 	}
 }

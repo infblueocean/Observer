@@ -64,7 +64,7 @@ func TestCoordinatorFetchesAllSources(t *testing.T) {
 	}
 
 	mock := &mockFetcher{}
-	coord := NewCoordinatorWithFetcher(s, mock, sources)
+	coord := NewCoordinatorWithFetcher(s, mock, nil, sources)
 
 	// Execute - just call fetchAll directly for this test
 	ctx := context.Background()
@@ -101,7 +101,7 @@ func TestCoordinatorRespectsContextCancellation(t *testing.T) {
 	mock := &mockFetcher{
 		fetchDelay: 100 * time.Millisecond,
 	}
-	coord := NewCoordinatorWithFetcher(s, mock, sources)
+	coord := NewCoordinatorWithFetcher(s, mock, nil, sources)
 
 	// Create a context that we'll cancel quickly
 	ctx, cancel := context.WithCancel(context.Background())
@@ -149,7 +149,7 @@ func TestCoordinatorHandlesFetchTimeout(t *testing.T) {
 	mock := &mockFetcher{
 		fetchDelay: 5 * time.Second, // Much longer than test timeout context
 	}
-	coord := NewCoordinatorWithFetcher(s, mock, sources)
+	coord := NewCoordinatorWithFetcher(s, mock, nil, sources)
 
 	// Create a context with a short timeout to simulate per-fetch timeout
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
@@ -202,7 +202,7 @@ func TestCoordinatorSavesItems(t *testing.T) {
 	mock := &mockFetcher{
 		returnItems: testItems,
 	}
-	coord := NewCoordinatorWithFetcher(s, mock, sources)
+	coord := NewCoordinatorWithFetcher(s, mock, nil, sources)
 
 	// Execute
 	ctx := context.Background()
@@ -232,7 +232,7 @@ func TestCoordinatorStartAndWait(t *testing.T) {
 	}
 
 	mock := &mockFetcher{}
-	coord := NewCoordinatorWithFetcher(s, mock, sources)
+	coord := NewCoordinatorWithFetcher(s, mock, nil, sources)
 
 	// Create cancellable context
 	ctx, cancel := context.WithCancel(context.Background())
@@ -281,7 +281,7 @@ func TestCoordinatorSourcesImmutable(t *testing.T) {
 	}
 
 	mock := &mockFetcher{}
-	coord := NewCoordinatorWithFetcher(s, mock, sources)
+	coord := NewCoordinatorWithFetcher(s, mock, nil, sources)
 
 	// Modify the original slice
 	sources[0].Name = "Modified"
@@ -337,7 +337,7 @@ func TestCoordinatorSendsFetchCompleteMessages(t *testing.T) {
 		},
 	}
 
-	coord := NewCoordinatorWithFetcher(s, customFetcher, sources)
+	coord := NewCoordinatorWithFetcher(s, customFetcher, nil, sources)
 
 	// Execute with nil program (we test that it handles nil gracefully)
 	ctx := context.Background()
@@ -370,7 +370,7 @@ func TestCoordinatorHandlesNilProgram(t *testing.T) {
 	}
 
 	mock := &mockFetcher{}
-	coord := NewCoordinatorWithFetcher(s, mock, sources)
+	coord := NewCoordinatorWithFetcher(s, mock, nil, sources)
 
 	// Execute with nil program - should not panic
 	ctx := context.Background()
@@ -417,7 +417,7 @@ func TestCoordinatorHandlesFetchError(t *testing.T) {
 		},
 	}
 
-	coord := NewCoordinatorWithFetcher(s, customFetcher, sources)
+	coord := NewCoordinatorWithFetcher(s, customFetcher, nil, sources)
 
 	// Execute
 	ctx := context.Background()
@@ -437,4 +437,331 @@ func TestCoordinatorHandlesFetchError(t *testing.T) {
 	if len(items) != 1 {
 		t.Errorf("expected 1 item saved (from good source), got %d", len(items))
 	}
+}
+
+// mockEmbedder implements embed.Embedder for testing.
+type mockEmbedder struct {
+	available bool
+	embedFunc func(ctx context.Context, text string) ([]float32, error)
+}
+
+func (m *mockEmbedder) Available() bool {
+	return m.available
+}
+
+func (m *mockEmbedder) Embed(ctx context.Context, text string) ([]float32, error) {
+	if m.embedFunc != nil {
+		return m.embedFunc(ctx, text)
+	}
+	return []float32{0.1, 0.2, 0.3}, nil
+}
+
+func TestCoordinatorEmbedsAfterFetch(t *testing.T) {
+	// Setup
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("failed to open store: %v", err)
+	}
+	defer s.Close()
+
+	sources := []fetch.Source{
+		{Type: "rss", Name: "TestSource", URL: "http://example.com/feed"},
+	}
+
+	now := time.Now()
+	testItems := []store.Item{
+		{
+			ID:         "item1",
+			SourceType: "rss",
+			SourceName: "TestSource",
+			Title:      "Test Item 1",
+			URL:        "http://example.com/1",
+			Published:  now,
+			Fetched:    now,
+		},
+	}
+
+	mock := &mockFetcher{returnItems: testItems}
+	embedCount := 0
+	embedder := &mockEmbedder{
+		available: true,
+		embedFunc: func(ctx context.Context, text string) ([]float32, error) {
+			embedCount++
+			return []float32{0.1, 0.2, 0.3}, nil
+		},
+	}
+	coord := NewCoordinatorWithFetcher(s, mock, embedder, sources)
+
+	// Execute
+	ctx := context.Background()
+	coord.fetchAll(ctx, nil)
+
+	// Verify embedding was called
+	if embedCount != 1 {
+		t.Errorf("expected 1 embed call, got %d", embedCount)
+	}
+
+	// Verify embedding was saved with correct content
+	emb, err := s.GetEmbedding("item1")
+	if err != nil {
+		t.Fatalf("failed to get embedding: %v", err)
+	}
+	if emb == nil {
+		t.Fatal("expected embedding to be saved, got nil")
+	}
+
+	// Verify embedding values match what the mock returned
+	expectedEmb := []float32{0.1, 0.2, 0.3}
+	if len(emb) != len(expectedEmb) {
+		t.Fatalf("embedding length mismatch: got %d, want %d", len(emb), len(expectedEmb))
+	}
+	for i, v := range expectedEmb {
+		if emb[i] != v {
+			t.Errorf("embedding[%d] = %f, want %f", i, emb[i], v)
+		}
+	}
+}
+
+func TestCoordinatorSkipsEmbeddingWhenUnavailable(t *testing.T) {
+	// Setup
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("failed to open store: %v", err)
+	}
+	defer s.Close()
+
+	sources := []fetch.Source{
+		{Type: "rss", Name: "TestSource", URL: "http://example.com/feed"},
+	}
+
+	now := time.Now()
+	testItems := []store.Item{
+		{
+			ID:         "item1",
+			SourceType: "rss",
+			SourceName: "TestSource",
+			Title:      "Test Item 1",
+			URL:        "http://example.com/1",
+			Published:  now,
+			Fetched:    now,
+		},
+	}
+
+	mock := &mockFetcher{returnItems: testItems}
+	embedCount := 0
+	embedder := &mockEmbedder{
+		available: false, // Embedder not available
+		embedFunc: func(ctx context.Context, text string) ([]float32, error) {
+			embedCount++
+			return []float32{0.1, 0.2, 0.3}, nil
+		},
+	}
+	coord := NewCoordinatorWithFetcher(s, mock, embedder, sources)
+
+	// Execute
+	ctx := context.Background()
+	coord.fetchAll(ctx, nil)
+
+	// Verify embedding was NOT called
+	if embedCount != 0 {
+		t.Errorf("expected 0 embed calls when unavailable, got %d", embedCount)
+	}
+}
+
+func TestCoordinatorRespectsCancellationDuringEmbedding(t *testing.T) {
+	// Setup
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("failed to open store: %v", err)
+	}
+	defer s.Close()
+
+	sources := []fetch.Source{
+		{Type: "rss", Name: "TestSource", URL: "http://example.com/feed"},
+	}
+
+	now := time.Now()
+	// Create multiple items to embed
+	testItems := []store.Item{
+		{ID: "item1", SourceType: "rss", SourceName: "TestSource", Title: "Test 1", URL: "http://example.com/1", Published: now, Fetched: now},
+		{ID: "item2", SourceType: "rss", SourceName: "TestSource", Title: "Test 2", URL: "http://example.com/2", Published: now, Fetched: now},
+		{ID: "item3", SourceType: "rss", SourceName: "TestSource", Title: "Test 3", URL: "http://example.com/3", Published: now, Fetched: now},
+	}
+
+	mock := &mockFetcher{returnItems: testItems}
+	embedCount := 0
+	ctx, cancel := context.WithCancel(context.Background())
+	embedder := &mockEmbedder{
+		available: true,
+		embedFunc: func(embCtx context.Context, text string) ([]float32, error) {
+			embedCount++
+			if embedCount == 1 {
+				cancel() // Cancel after first embed
+			}
+			return []float32{0.1, 0.2, 0.3}, nil
+		},
+	}
+	coord := NewCoordinatorWithFetcher(s, mock, embedder, sources)
+
+	// Execute
+	coord.fetchAll(ctx, nil)
+
+	// Verify embedding stopped early (should be less than 3)
+	if embedCount >= 3 {
+		t.Errorf("expected fewer than 3 embed calls due to cancellation, got %d", embedCount)
+	}
+}
+
+func TestCoordinatorHandlesEmbedErrors(t *testing.T) {
+	// Setup
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("failed to open store: %v", err)
+	}
+	defer s.Close()
+
+	sources := []fetch.Source{
+		{Type: "rss", Name: "TestSource", URL: "http://example.com/feed"},
+	}
+
+	now := time.Now()
+	testItems := []store.Item{
+		{ID: "item1", SourceType: "rss", SourceName: "TestSource", Title: "Test 1", URL: "http://example.com/1", Published: now, Fetched: now},
+		{ID: "item2", SourceType: "rss", SourceName: "TestSource", Title: "Test 2", URL: "http://example.com/2", Published: now, Fetched: now},
+	}
+
+	mock := &mockFetcher{returnItems: testItems}
+	embedCount := 0
+	embedder := &mockEmbedder{
+		available: true,
+		embedFunc: func(ctx context.Context, text string) ([]float32, error) {
+			embedCount++
+			if embedCount == 1 {
+				return nil, errors.New("embed failed")
+			}
+			return []float32{0.1, 0.2, 0.3}, nil
+		},
+	}
+	coord := NewCoordinatorWithFetcher(s, mock, embedder, sources)
+
+	// Execute
+	ctx := context.Background()
+	coord.fetchAll(ctx, nil)
+
+	// Verify both items were attempted despite error
+	if embedCount != 2 {
+		t.Errorf("expected 2 embed attempts despite error, got %d", embedCount)
+	}
+
+	// Verify first item was NOT embedded (error occurred)
+	emb1, _ := s.GetEmbedding("item1")
+	if emb1 != nil {
+		t.Error("expected item1 embedding NOT to be saved due to error")
+	}
+
+	// Verify second item was embedded (succeeded)
+	emb2, _ := s.GetEmbedding("item2")
+	if emb2 == nil {
+		t.Error("expected item2 embedding to be saved")
+	}
+}
+
+func TestCoordinatorSkipsEmbeddingWhenNilEmbedder(t *testing.T) {
+	// Setup
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("failed to open store: %v", err)
+	}
+	defer s.Close()
+
+	sources := []fetch.Source{
+		{Type: "rss", Name: "TestSource", URL: "http://example.com/feed"},
+	}
+
+	now := time.Now()
+	testItems := []store.Item{
+		{ID: "item1", SourceType: "rss", SourceName: "TestSource", Title: "Test 1", URL: "http://example.com/1", Published: now, Fetched: now},
+	}
+
+	mock := &mockFetcher{returnItems: testItems}
+	// Explicitly pass nil embedder
+	coord := NewCoordinatorWithFetcher(s, mock, nil, sources)
+
+	// Execute
+	ctx := context.Background()
+	coord.fetchAll(ctx, nil)
+
+	// Verify items were fetched
+	items, _ := s.GetItems(100, true)
+	if len(items) != 1 {
+		t.Errorf("expected 1 item saved, got %d", len(items))
+	}
+
+	// Verify no embedding was saved (since embedder is nil)
+	emb, _ := s.GetEmbedding("item1")
+	if emb != nil {
+		t.Error("expected no embedding when embedder is nil")
+	}
+}
+
+func TestCoordinatorStopsWhenOllamaDisappears(t *testing.T) {
+	// Setup
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("failed to open store: %v", err)
+	}
+	defer s.Close()
+
+	sources := []fetch.Source{
+		{Type: "rss", Name: "TestSource", URL: "http://example.com/feed"},
+	}
+
+	now := time.Now()
+	testItems := []store.Item{
+		{ID: "item1", SourceType: "rss", SourceName: "TestSource", Title: "Test 1", URL: "http://example.com/1", Published: now, Fetched: now},
+		{ID: "item2", SourceType: "rss", SourceName: "TestSource", Title: "Test 2", URL: "http://example.com/2", Published: now, Fetched: now},
+		{ID: "item3", SourceType: "rss", SourceName: "TestSource", Title: "Test 3", URL: "http://example.com/3", Published: now, Fetched: now},
+	}
+
+	mock := &mockFetcher{returnItems: testItems}
+	embedCount := 0
+	available := true
+
+	// Use dynamic availability mock - Available() returns false after first embed
+	coord := NewCoordinatorWithFetcher(s, mock, &mockEmbedderWithDynamicAvailable{
+		available: &available,
+		embedFunc: func(ctx context.Context, text string) ([]float32, error) {
+			embedCount++
+			if embedCount == 1 {
+				available = false // Ollama disappears after first embed
+			}
+			return []float32{0.1, 0.2, 0.3}, nil
+		},
+	}, sources)
+
+	// Execute
+	ctx := context.Background()
+	coord.fetchAll(ctx, nil)
+
+	// Verify embedding stopped early (should be 1, since Available() returns false after first)
+	if embedCount >= 3 {
+		t.Errorf("expected fewer than 3 embed calls when Ollama disappears, got %d", embedCount)
+	}
+}
+
+// mockEmbedderWithDynamicAvailable allows changing availability during test.
+type mockEmbedderWithDynamicAvailable struct {
+	available *bool
+	embedFunc func(ctx context.Context, text string) ([]float32, error)
+}
+
+func (m *mockEmbedderWithDynamicAvailable) Available() bool {
+	return *m.available
+}
+
+func (m *mockEmbedderWithDynamicAvailable) Embed(ctx context.Context, text string) ([]float32, error) {
+	if m.embedFunc != nil {
+		return m.embedFunc(ctx, text)
+	}
+	return []float32{0.1, 0.2, 0.3}, nil
 }

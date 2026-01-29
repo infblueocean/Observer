@@ -9,6 +9,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/abelbrown/observer/internal/coord"
+	"github.com/abelbrown/observer/internal/embed"
 	"github.com/abelbrown/observer/internal/fetch"
 	"github.com/abelbrown/observer/internal/filter"
 	"github.com/abelbrown/observer/internal/store"
@@ -40,6 +41,9 @@ func main() {
 	// Create fetcher
 	fetcher := fetch.NewFetcher(30 * time.Second)
 
+	// Create embedder (optional - gracefully degrades if Ollama unavailable)
+	embedder := embed.NewOllamaEmbedder("http://localhost:11434", "nomic-embed-text")
+
 	// Default sources (can be made configurable later)
 	sources := []fetch.Source{
 		{Type: "rss", Name: "Hacker News", URL: "https://news.ycombinator.com/rss"},
@@ -56,7 +60,22 @@ func main() {
 					return ui.ItemsLoaded{Err: err}
 				}
 				items = filter.ByAge(items, 24*time.Hour)
-				items = filter.Dedup(items)
+
+				// Get embeddings for semantic dedup
+				ids := make([]string, len(items))
+				for i, item := range items {
+					ids[i] = item.ID
+				}
+				embeddings, err := st.GetItemsWithEmbeddings(ids)
+				if err != nil {
+					// Log but continue - semantic dedup will fall back to URL dedup
+					log.Printf("Warning: failed to get embeddings: %v", err)
+					embeddings = make(map[string][]float32)
+				}
+
+				// Use semantic dedup (falls back to URL dedup if no embeddings)
+				// Threshold 0.85 means items with >85% cosine similarity are considered duplicates
+				items = filter.SemanticDedup(items, embeddings, 0.85)
 				items = filter.LimitPerSource(items, 20)
 				return ui.ItemsLoaded{Items: items}
 			}
@@ -80,7 +99,7 @@ func main() {
 	program := tea.NewProgram(app, tea.WithAltScreen())
 
 	// Create and start coordinator
-	coordinator := coord.NewCoordinator(st, fetcher, sources)
+	coordinator := coord.NewCoordinator(st, fetcher, embedder, sources)
 	coordinator.Start(ctx, program)
 
 	// Run UI (blocks until quit)

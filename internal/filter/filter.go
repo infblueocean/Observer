@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/abelbrown/observer/internal/embed"
 	"github.com/abelbrown/observer/internal/store"
 )
 
@@ -155,6 +156,50 @@ func LimitPerSource(items []store.Item, maxPerSource int) []store.Item {
 	sort.Slice(result, func(i, j int) bool {
 		return result[i].Published.After(result[j].Published)
 	})
+
+	return result
+}
+
+// SemanticDedup removes semantically similar items using embeddings.
+// Uses cosine similarity with threshold (e.g., 0.85).
+// Falls back to URL dedup if embeddings unavailable for an item.
+// First occurrence wins.
+func SemanticDedup(items []store.Item, embeddings map[string][]float32, threshold float32) []store.Item {
+	if len(items) == 0 {
+		return []store.Item{}
+	}
+
+	seenURLs := make(map[string]bool)
+	var seenEmbeddings [][]float32
+
+	result := make([]store.Item, 0, len(items))
+
+	for _, item := range items {
+		// URL dedup (always)
+		if item.URL != "" && seenURLs[item.URL] {
+			continue
+		}
+
+		// Semantic dedup (if embedding available)
+		if emb, ok := embeddings[item.ID]; ok {
+			isDup := false
+			for _, seen := range seenEmbeddings {
+				if embed.CosineSimilarity(emb, seen) > threshold {
+					isDup = true
+					break
+				}
+			}
+			if isDup {
+				continue
+			}
+			seenEmbeddings = append(seenEmbeddings, emb)
+		}
+
+		if item.URL != "" {
+			seenURLs[item.URL] = true
+		}
+		result = append(result, item)
+	}
 
 	return result
 }
