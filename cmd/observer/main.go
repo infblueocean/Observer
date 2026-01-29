@@ -42,7 +42,7 @@ func main() {
 	fetcher := fetch.NewFetcher(30 * time.Second)
 
 	// Create embedder (optional - gracefully degrades if Ollama unavailable)
-	embedder := embed.NewOllamaEmbedder("http://localhost:11434", "nomic-embed-text")
+	embedder := embed.NewOllamaEmbedder("http://localhost:11434", "mxbai-embed-large")
 
 	// Default sources (can be made configurable later)
 	sources := []fetch.Source{
