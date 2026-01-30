@@ -1175,6 +1175,460 @@ func TestAppItemsLoadedCancelsReranking(t *testing.T) {
 	}
 }
 
+// --- Two-stage loading tests ---
+
+func TestTwoStageLoading(t *testing.T) {
+	// Track which functions were called
+	var recentCalled, fullCalled bool
+
+	stage1Items := []store.Item{
+		{ID: "a", Title: "Recent Item A", Published: time.Now()},
+		{ID: "b", Title: "Recent Item B", Published: time.Now().Add(-30 * time.Minute)},
+	}
+	stage2Items := []store.Item{
+		{ID: "a", Title: "Recent Item A", Published: time.Now()},
+		{ID: "b", Title: "Recent Item B", Published: time.Now().Add(-30 * time.Minute)},
+		{ID: "c", Title: "Older Item C", Published: time.Now().Add(-12 * time.Hour)},
+		{ID: "d", Title: "Older Item D", Published: time.Now().Add(-20 * time.Hour)},
+	}
+
+	app := NewAppWithConfig(AppConfig{
+		LoadRecentItems: func() tea.Cmd {
+			recentCalled = true
+			return func() tea.Msg {
+				return ItemsLoaded{Items: stage1Items}
+			}
+		},
+		LoadItems: func() tea.Cmd {
+			fullCalled = true
+			return func() tea.Msg {
+				return ItemsLoaded{Items: stage2Items}
+			}
+		},
+	})
+
+	// Init should call loadRecentItems, not loadItems
+	cmd := app.Init()
+	if !recentCalled {
+		t.Error("Init should call loadRecentItems")
+	}
+	if fullCalled {
+		t.Error("Init should not call loadItems directly")
+	}
+	if cmd == nil {
+		t.Fatal("Init should return a command")
+	}
+
+	// Stage 1 arrives: items set, Stage 2 chained
+	model, cmd := app.Update(ItemsLoaded{Items: stage1Items})
+	updated := model.(App)
+
+	if len(updated.Items()) != 2 {
+		t.Errorf("Stage 1 should set 2 items, got %d", len(updated.Items()))
+	}
+	if !updated.fullLoaded {
+		t.Error("fullLoaded should be true after Stage 1 chains Stage 2")
+	}
+	if !fullCalled {
+		t.Error("Stage 1 should chain loadItems (Stage 2)")
+	}
+	if cmd == nil {
+		t.Error("Stage 1 should return a command for Stage 2")
+	}
+
+	// Stage 2 arrives: items replaced, no further chaining
+	model, cmd = updated.Update(ItemsLoaded{Items: stage2Items})
+	updated = model.(App)
+
+	if len(updated.Items()) != 4 {
+		t.Errorf("Stage 2 should set 4 items, got %d", len(updated.Items()))
+	}
+	if cmd != nil {
+		t.Error("Stage 2 should not chain further loads")
+	}
+}
+
+func TestCursorRestoredByID(t *testing.T) {
+	app := NewAppWithConfig(AppConfig{
+		LoadItems: func() tea.Cmd {
+			return func() tea.Msg {
+				return ItemsLoaded{Items: []store.Item{
+					{ID: "x", Title: "Item X"},
+					{ID: "y", Title: "Item Y"},
+					{ID: "z", Title: "Item Z"},
+				}}
+			}
+		},
+	})
+
+	// Set initial items with cursor on item "b"
+	app.items = []store.Item{
+		{ID: "a", Title: "Item A"},
+		{ID: "b", Title: "Item B"},
+		{ID: "c", Title: "Item C"},
+	}
+	app.cursor = 1 // pointing at "b"
+	app.fullLoaded = true // skip Stage 2 chaining
+
+	// Load new items that include "b" at a different index
+	newItems := []store.Item{
+		{ID: "x", Title: "Item X"},
+		{ID: "b", Title: "Item B"},
+		{ID: "y", Title: "Item Y"},
+		{ID: "z", Title: "Item Z"},
+	}
+	model, _ := app.Update(ItemsLoaded{Items: newItems})
+	updated := model.(App)
+
+	if updated.Cursor() != 1 {
+		t.Errorf("Cursor should point to item 'b' at index 1, got %d", updated.Cursor())
+	}
+	if updated.Items()[updated.Cursor()].ID != "b" {
+		t.Errorf("Cursor should be on item 'b', got '%s'", updated.Items()[updated.Cursor()].ID)
+	}
+}
+
+func TestCursorClampedWhenIDNotFound(t *testing.T) {
+	app := NewApp(nil, nil, nil)
+	app.items = []store.Item{
+		{ID: "old", Title: "Old Item"},
+	}
+	app.cursor = 0
+	app.fullLoaded = true
+
+	// Load items that don't contain "old"
+	newItems := []store.Item{
+		{ID: "new1", Title: "New 1"},
+		{ID: "new2", Title: "New 2"},
+	}
+	model, _ := app.Update(ItemsLoaded{Items: newItems})
+	updated := model.(App)
+
+	// Cursor was 0, which is still valid, so it stays at 0
+	if updated.Cursor() != 0 {
+		t.Errorf("Cursor should be clamped to 0, got %d", updated.Cursor())
+	}
+}
+
+func TestRefreshResetsTwoStage(t *testing.T) {
+	var recentCalled bool
+	app := NewAppWithConfig(AppConfig{
+		LoadRecentItems: func() tea.Cmd {
+			recentCalled = true
+			return func() tea.Msg {
+				return ItemsLoaded{Items: []store.Item{}}
+			}
+		},
+		LoadItems: func() tea.Cmd {
+			return func() tea.Msg {
+				return ItemsLoaded{Items: []store.Item{}}
+			}
+		},
+	})
+	app.fullLoaded = true
+
+	// Press "r" to refresh
+	model, cmd := app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+	updated := model.(App)
+
+	if !recentCalled {
+		t.Error("r should call loadRecentItems")
+	}
+	if updated.fullLoaded {
+		t.Error("r should reset fullLoaded to false")
+	}
+	if !updated.loading {
+		t.Error("r should set loading to true")
+	}
+	if cmd == nil {
+		t.Error("r should return a command")
+	}
+}
+
+// --- Full-history search tests ---
+
+func TestSearchSavesAndRestores(t *testing.T) {
+	chronoItems := []store.Item{
+		{ID: "1", Title: "Chrono Item 1", Published: time.Now()},
+		{ID: "2", Title: "Chrono Item 2", Published: time.Now().Add(-time.Hour)},
+	}
+	chronoEmbeddings := map[string][]float32{
+		"1": {0.1, 0.2},
+		"2": {0.3, 0.4},
+	}
+
+	app := NewAppWithConfig(AppConfig{
+		LoadSearchPool: func() tea.Cmd {
+			return func() tea.Msg {
+				return SearchPoolLoaded{
+					Items:      []store.Item{{ID: "s1", Title: "Search Pool Item"}},
+					Embeddings: map[string][]float32{"s1": {0.5, 0.6}},
+				}
+			}
+		},
+		EmbedQuery: func(query string) tea.Cmd {
+			return func() tea.Msg {
+				return QueryEmbedded{Query: query, Embedding: []float32{1, 2, 3}}
+			}
+		},
+	})
+	app.items = chronoItems
+	app.embeddings = chronoEmbeddings
+
+	// Enter search mode and submit
+	model, _ := app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+	updated := model.(App)
+	for _, ch := range "test" {
+		model, _ = updated.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{ch}})
+		updated = model.(App)
+	}
+	model, _ = updated.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated = model.(App)
+
+	// Verify items were saved
+	if updated.savedItems == nil {
+		t.Fatal("submitSearch should save items")
+	}
+	if len(updated.savedItems) != 2 {
+		t.Errorf("savedItems should have 2 items, got %d", len(updated.savedItems))
+	}
+	if updated.savedEmbeddings == nil {
+		t.Fatal("submitSearch should save embeddings")
+	}
+
+	// Now press Esc to restore
+	model, _ = updated.Update(tea.KeyMsg{Type: tea.KeyEscape})
+	updated = model.(App)
+
+	if len(updated.Items()) != 2 {
+		t.Errorf("Esc should restore 2 chronological items, got %d", len(updated.Items()))
+	}
+	if updated.Items()[0].ID != "1" {
+		t.Errorf("Restored items should start with ID '1', got '%s'", updated.Items()[0].ID)
+	}
+	if updated.savedItems != nil {
+		t.Error("savedItems should be nil after restore")
+	}
+	if updated.savedEmbeddings != nil {
+		t.Error("savedEmbeddings should be nil after restore")
+	}
+}
+
+func TestSearchPoolLoaded(t *testing.T) {
+	poolItems := []store.Item{
+		{ID: "p1", Title: "Pool 1"},
+		{ID: "p2", Title: "Pool 2"},
+		{ID: "p3", Title: "Pool 3"},
+	}
+	poolEmb := map[string][]float32{
+		"p1": {0.1}, "p2": {0.2}, "p3": {0.3},
+	}
+
+	app := NewApp(nil, nil, nil)
+	app.items = []store.Item{{ID: "old", Title: "Old"}}
+	app.filterInput.SetValue("test query")
+	// Simulate: search submitted, not in search input mode
+	app.searchActive = false
+
+	model, _ := app.Update(SearchPoolLoaded{Items: poolItems, Embeddings: poolEmb})
+	updated := model.(App)
+
+	if len(updated.Items()) != 3 {
+		t.Errorf("SearchPoolLoaded should replace items, got %d", len(updated.Items()))
+	}
+	if updated.Items()[0].ID != "p1" {
+		t.Errorf("First item should be p1, got '%s'", updated.Items()[0].ID)
+	}
+}
+
+func TestSearchPoolAndQueryRace_QueryFirst(t *testing.T) {
+	// QueryEmbedded arrives before SearchPoolLoaded
+	app := NewAppWithConfig(AppConfig{
+		BatchRerank: func(query string, docs []string) tea.Cmd {
+			return func() tea.Msg {
+				return RerankComplete{Query: query, Scores: make([]float32, len(docs))}
+			}
+		},
+	})
+	app.items = []store.Item{
+		{ID: "1", Title: "Item 1"},
+	}
+	app.filterInput.SetValue("test")
+	app.searchPoolPending = true // search pool still loading
+
+	// QueryEmbedded arrives first
+	model, _ := app.Update(QueryEmbedded{Query: "test", Embedding: []float32{1, 2, 3}})
+	updated := model.(App)
+
+	// Should NOT start reranking (pool not ready)
+	if updated.rerankPending {
+		t.Error("Should not start reranking before search pool arrives")
+	}
+	// But embedding should be stored
+	if updated.queryEmbedding == nil {
+		t.Error("queryEmbedding should be stored even when pool is pending")
+	}
+
+	// Now SearchPoolLoaded arrives
+	poolItems := []store.Item{
+		{ID: "p1", Title: "Pool 1"},
+		{ID: "p2", Title: "Pool 2"},
+	}
+	model, _ = updated.Update(SearchPoolLoaded{
+		Items:      poolItems,
+		Embeddings: map[string][]float32{"p1": {0.5}, "p2": {0.6}},
+	})
+	updated = model.(App)
+
+	// Now reranking should start
+	if !updated.rerankPending {
+		t.Error("SearchPoolLoaded should trigger reranking when query embedding is ready")
+	}
+	if len(updated.Items()) != 2 {
+		t.Errorf("Items should be pool items, got %d", len(updated.Items()))
+	}
+}
+
+func TestSearchPoolAndQueryRace_PoolFirst(t *testing.T) {
+	// SearchPoolLoaded arrives before QueryEmbedded
+	app := NewAppWithConfig(AppConfig{
+		BatchRerank: func(query string, docs []string) tea.Cmd {
+			return func() tea.Msg {
+				return RerankComplete{Query: query, Scores: make([]float32, len(docs))}
+			}
+		},
+	})
+	app.items = []store.Item{{ID: "1", Title: "Item 1"}}
+	app.filterInput.SetValue("test")
+	app.searchPoolPending = true
+	app.embeddingPending = true
+
+	// SearchPoolLoaded arrives first (no query embedding yet)
+	model, _ := app.Update(SearchPoolLoaded{
+		Items:      []store.Item{{ID: "p1", Title: "Pool 1"}},
+		Embeddings: map[string][]float32{"p1": {0.5}},
+	})
+	updated := model.(App)
+
+	// Should not rerank (no query embedding yet)
+	if updated.rerankPending {
+		t.Error("Should not start reranking before query embedding arrives")
+	}
+	if updated.searchPoolPending {
+		t.Error("searchPoolPending should be cleared")
+	}
+
+	// Now QueryEmbedded arrives
+	model, _ = updated.Update(QueryEmbedded{Query: "test", Embedding: []float32{1, 2, 3}})
+	updated = model.(App)
+
+	// Now reranking should start
+	if !updated.rerankPending {
+		t.Error("QueryEmbedded should trigger reranking when pool is ready")
+	}
+}
+
+func TestStaleSearchPoolIgnored(t *testing.T) {
+	app := NewApp(nil, nil, nil)
+	app.items = []store.Item{
+		{ID: "1", Title: "Chrono Item", Published: time.Now()},
+	}
+	// No active query (user pressed Esc)
+	app.filterInput.SetValue("")
+	app.searchActive = false
+
+	// Stale SearchPoolLoaded arrives after Esc
+	model, _ := app.Update(SearchPoolLoaded{
+		Items:      []store.Item{{ID: "stale", Title: "Stale Pool Item"}},
+		Embeddings: map[string][]float32{"stale": {0.1}},
+	})
+	updated := model.(App)
+
+	// Items should NOT be replaced
+	if updated.Items()[0].ID != "1" {
+		t.Errorf("Stale SearchPoolLoaded should be ignored, items[0].ID = '%s'", updated.Items()[0].ID)
+	}
+}
+
+func TestStage2DuringSearch(t *testing.T) {
+	// Stage 2 ItemsLoaded arrives while search is active
+	stage2Items := []store.Item{
+		{ID: "a", Title: "Full A"},
+		{ID: "b", Title: "Full B"},
+		{ID: "c", Title: "Full C"},
+	}
+
+	app := NewApp(nil, nil, nil)
+	app.items = []store.Item{{ID: "search-result", Title: "Search Result"}}
+	// Simulate active search with saved items
+	app.savedItems = []store.Item{{ID: "s1", Title: "Saved Stage 1"}}
+	app.savedEmbeddings = map[string][]float32{"s1": {0.1}}
+	app.fullLoaded = true
+
+	// Stage 2 arrives during search
+	model, _ := app.Update(ItemsLoaded{
+		Items:      stage2Items,
+		Embeddings: map[string][]float32{"a": {1}, "b": {2}, "c": {3}},
+	})
+	updated := model.(App)
+
+	// Live search items should NOT be replaced
+	if updated.Items()[0].ID != "search-result" {
+		t.Errorf("Live items should not be replaced during search, got '%s'", updated.Items()[0].ID)
+	}
+
+	// savedItems SHOULD be updated with Stage 2 data
+	if len(updated.savedItems) != 3 {
+		t.Errorf("savedItems should be updated to Stage 2 items, got %d", len(updated.savedItems))
+	}
+	if updated.savedItems[0].ID != "a" {
+		t.Errorf("savedItems[0] should be 'a', got '%s'", updated.savedItems[0].ID)
+	}
+
+	// savedEmbeddings should be updated
+	if len(updated.savedEmbeddings) != 3 {
+		t.Errorf("savedEmbeddings should have 3 entries, got %d", len(updated.savedEmbeddings))
+	}
+}
+
+func TestSearchPoolLoadedError(t *testing.T) {
+	app := NewApp(nil, nil, nil)
+	app.filterInput.SetValue("test")
+	app.searchActive = false
+	app.searchPoolPending = true
+
+	testErr := fmt.Errorf("search pool failed")
+	model, _ := app.Update(SearchPoolLoaded{Err: testErr})
+	updated := model.(App)
+
+	if updated.searchPoolPending {
+		t.Error("searchPoolPending should be cleared on error")
+	}
+	if updated.err == nil {
+		t.Error("Error should be set")
+	}
+}
+
+func TestInitFallsBackToLoadItems(t *testing.T) {
+	var fullCalled bool
+	app := NewAppWithConfig(AppConfig{
+		LoadItems: func() tea.Cmd {
+			fullCalled = true
+			return func() tea.Msg {
+				return ItemsLoaded{Items: []store.Item{}}
+			}
+		},
+	})
+
+	cmd := app.Init()
+	if !fullCalled {
+		t.Error("Init should fall back to loadItems when loadRecentItems is nil")
+	}
+	if cmd == nil {
+		t.Error("Init should return a command")
+	}
+}
+
 func TestTruncateRunesEdgeCases(t *testing.T) {
 	// maxRunes = 0
 	if got := truncateRunes("hello", 0); got != "" {

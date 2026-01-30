@@ -19,12 +19,14 @@ import (
 // App is the root Bubble Tea model.
 // IMPORTANT: App does NOT hold *store.Store. It receives items via messages.
 type App struct {
-	loadItems    func() tea.Cmd
-	markRead     func(id string) tea.Cmd
-	triggerFetch func() tea.Cmd
-	embedQuery   func(query string) tea.Cmd
-	scoreEntry   func(query string, doc string, index int) tea.Cmd // score single entry
-	batchRerank  func(query string, docs []string) tea.Cmd         // batch rerank all docs at once
+	loadItems       func() tea.Cmd
+	loadRecentItems func() tea.Cmd // loads last 1h (fast first paint)
+	loadSearchPool  func() tea.Cmd // loads all items for search
+	markRead        func(id string) tea.Cmd
+	triggerFetch    func() tea.Cmd
+	embedQuery      func(query string) tea.Cmd
+	scoreEntry      func(query string, doc string, index int) tea.Cmd // score single entry
+	batchRerank     func(query string, docs []string) tea.Cmd         // batch rerank all docs at once
 
 	items      []store.Item
 	embeddings map[string][]float32 // item ID -> embedding
@@ -35,9 +37,19 @@ type App struct {
 	ready      bool
 	loading    bool
 
+	// Two-stage loading
+	fullLoaded bool // true after Stage 2 completes
+
 	// Search mode: press "/" to activate, type query, Enter to submit
 	searchActive bool // true when typing in search input
 	filterInput  textinput.Model
+
+	// Full-history search: save/restore chronological view
+	savedItems      []store.Item         // chronological items saved before search
+	savedEmbeddings map[string][]float32 // embeddings saved before search
+
+	// Search pool loading
+	searchPoolPending bool // true while loading search pool from DB
 
 	// Query state
 	queryEmbedding    []float32 // current query's embedding
@@ -59,13 +71,15 @@ type App struct {
 
 // AppConfig holds the configuration for creating a new App.
 type AppConfig struct {
-	LoadItems    func() tea.Cmd
-	MarkRead     func(id string) tea.Cmd
-	TriggerFetch func() tea.Cmd
-	EmbedQuery   func(query string) tea.Cmd
-	ScoreEntry   func(query string, doc string, index int) tea.Cmd
-	BatchRerank  func(query string, docs []string) tea.Cmd
-	Embeddings   map[string][]float32
+	LoadItems       func() tea.Cmd
+	LoadRecentItems func() tea.Cmd
+	LoadSearchPool  func() tea.Cmd
+	MarkRead        func(id string) tea.Cmd
+	TriggerFetch    func() tea.Cmd
+	EmbedQuery      func(query string) tea.Cmd
+	ScoreEntry      func(query string, doc string, index int) tea.Cmd
+	BatchRerank     func(query string, docs []string) tea.Cmd
+	Embeddings      map[string][]float32
 }
 
 // NewApp creates a new App with the given command functions.
@@ -100,24 +114,30 @@ func newApp(cfg AppConfig) App {
 	}
 
 	return App{
-		loadItems:    cfg.LoadItems,
-		markRead:     cfg.MarkRead,
-		triggerFetch: cfg.TriggerFetch,
-		embedQuery:   cfg.EmbedQuery,
-		scoreEntry:   cfg.ScoreEntry,
-		batchRerank:  cfg.BatchRerank,
-		cursor:       0,
-		filterInput:  ti,
-		embeddings:   embeddings,
-		spinner:      s,
-		progress:     p,
+		loadItems:       cfg.LoadItems,
+		loadRecentItems: cfg.LoadRecentItems,
+		loadSearchPool:  cfg.LoadSearchPool,
+		markRead:        cfg.MarkRead,
+		triggerFetch:    cfg.TriggerFetch,
+		embedQuery:      cfg.EmbedQuery,
+		scoreEntry:      cfg.ScoreEntry,
+		batchRerank:     cfg.BatchRerank,
+		cursor:          0,
+		filterInput:     ti,
+		embeddings:      embeddings,
+		spinner:         s,
+		progress:        p,
 	}
 }
 
 // Init initializes the App by loading items.
+// Uses loadRecentItems (Stage 1) for fast first paint if available,
+// otherwise falls back to loadItems (full load).
 func (a App) Init() tea.Cmd {
+	if a.loadRecentItems != nil {
+		return a.loadRecentItems()
+	}
 	if a.loadItems != nil {
-		a.loading = true
 		return a.loadItems()
 	}
 	return nil
@@ -156,26 +176,54 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.loading = false
 		if msg.Err != nil {
 			a.err = msg.Err
-		} else {
-			a.items = msg.Items
-			a.err = nil
+			return a, nil
+		}
+
+		// If search is active, update savedItems instead of live view
+		if a.savedItems != nil {
+			a.savedItems = msg.Items
 			if msg.Embeddings != nil {
-				a.embeddings = msg.Embeddings
+				a.savedEmbeddings = msg.Embeddings
 			}
-			if a.cursor >= len(a.items) && len(a.items) > 0 {
-				a.cursor = len(a.items) - 1
+			// Still chain Stage 2 if needed
+			if !a.fullLoaded && a.loadItems != nil {
+				a.fullLoaded = true
+				return a, a.loadItems()
 			}
-			// Cancel in-flight reranking - items have changed
-			if a.rerankPending {
-				a.rerankPending = false
-				a.rerankEntries = nil
-				a.rerankScores = nil
-				a.rerankProgress = 0
-			}
-			// Re-apply reranking if we have an active query
-			if a.hasQuery() && len(a.queryEmbedding) > 0 {
-				a.rerankItemsByEmbedding()
-			}
+			return a, nil
+		}
+
+		// Cursor stability: record current item ID
+		cursorID := ""
+		if a.cursor < len(a.items) && len(a.items) > 0 {
+			cursorID = a.items[a.cursor].ID
+		}
+
+		a.items = msg.Items
+		a.err = nil
+		if msg.Embeddings != nil {
+			a.embeddings = msg.Embeddings
+		}
+
+		// Restore cursor by ID (not index)
+		a.restoreCursor(cursorID)
+
+		// Cancel in-flight reranking - items have changed
+		if a.rerankPending {
+			a.rerankPending = false
+			a.rerankEntries = nil
+			a.rerankScores = nil
+			a.rerankProgress = 0
+		}
+		// Re-apply reranking if we have an active query
+		if a.hasQuery() && len(a.queryEmbedding) > 0 {
+			a.rerankItemsByEmbedding()
+		}
+
+		// Chain Stage 2: load full corpus after first paint
+		if !a.fullLoaded && a.loadItems != nil {
+			a.fullLoaded = true
+			return a, a.loadItems()
 		}
 		return a, nil
 
@@ -187,10 +235,38 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.Query == a.filterInput.Value() {
 			a.queryEmbedding = msg.Embedding
 			a.lastEmbeddedQuery = msg.Query
-			// Stage 1: fast embedding-based reranking
+			// Always apply fast cosine reranking for immediate feedback
 			a.rerankItemsByEmbedding()
-			// Stage 2: start sequential cross-encoder reranking
-			return a.startReranking(msg.Query)
+			// Only start cross-encoder if search pool has already arrived
+			if !a.searchPoolPending {
+				return a.startReranking(msg.Query)
+			}
+		}
+		return a, nil
+
+	case SearchPoolLoaded:
+		a.searchPoolPending = false
+		// Discard if no active query (user pressed Esc before pool arrived)
+		if !a.hasQuery() {
+			return a, nil
+		}
+		if msg.Err != nil {
+			a.err = msg.Err
+			return a, nil
+		}
+		// Cancel in-flight reranking — items are about to change
+		if a.rerankPending {
+			a.rerankPending = false
+			a.rerankEntries = nil
+			a.rerankScores = nil
+			a.rerankProgress = 0
+		}
+		a.items = msg.Items
+		a.embeddings = msg.Embeddings
+		// If query embedding already arrived, apply full reranking now
+		if len(a.queryEmbedding) > 0 {
+			a.rerankItemsByEmbedding()
+			return a.startReranking(a.filterInput.Value())
 		}
 		return a, nil
 
@@ -344,6 +420,11 @@ func (a App) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "q":
 		return a, tea.Quit
 	case "r":
+		if a.loadRecentItems != nil {
+			a.fullLoaded = false
+			a.loading = true
+			return a, a.loadRecentItems()
+		}
 		if a.loadItems != nil {
 			a.loading = true
 			return a, a.loadItems()
@@ -406,12 +487,30 @@ func (a App) submitSearch() (tea.Model, tea.Cmd) {
 	a.searchActive = false
 	a.filterInput.Blur()
 
-	if a.embedQuery != nil {
-		a.embeddingPending = true
-		return a, tea.Batch(a.spinner.Tick, a.embedQuery(query))
+	// Save current chronological view for restore on Esc
+	a.savedItems = make([]store.Item, len(a.items))
+	copy(a.savedItems, a.items)
+	a.savedEmbeddings = make(map[string][]float32, len(a.embeddings))
+	for k, v := range a.embeddings {
+		a.savedEmbeddings[k] = v
 	}
 
-	// No embedding available; try cross-encoder reranking directly
+	// Load full search pool + embed query in parallel
+	var cmds []tea.Cmd
+	if a.loadSearchPool != nil {
+		a.searchPoolPending = true
+		cmds = append(cmds, a.loadSearchPool())
+	}
+	if a.embedQuery != nil {
+		a.embeddingPending = true
+		cmds = append(cmds, a.embedQuery(query))
+	}
+	if len(cmds) > 0 {
+		cmds = append(cmds, a.spinner.Tick)
+		return a, tea.Batch(cmds...)
+	}
+
+	// No search pool or embedding available; try cross-encoder reranking directly
 	if a.scoreEntry != nil {
 		return a.startReranking(query)
 	}
@@ -427,12 +526,22 @@ func (a App) clearSearch() (tea.Model, tea.Cmd) {
 	a.queryEmbedding = nil
 	a.lastEmbeddedQuery = ""
 	a.embeddingPending = false
+	a.searchPoolPending = false
 	a.rerankPending = false
 	a.rerankQuery = ""
 	a.rerankEntries = nil
 	a.rerankScores = nil
 	a.rerankProgress = 0
-	a.sortByFetchTime()
+
+	// Restore chronological view
+	if a.savedItems != nil {
+		a.items = a.savedItems
+		a.embeddings = a.savedEmbeddings
+		a.savedItems = nil
+		a.savedEmbeddings = nil
+	} else {
+		a.sortByFetchTime()
+	}
 	return a, nil
 }
 
@@ -627,6 +736,23 @@ func (a *App) sortByFetchTime() {
 	})
 }
 
+// restoreCursor finds the item with targetID and sets the cursor to its index.
+// Falls back to clamping the cursor to the last item if not found.
+func (a *App) restoreCursor(targetID string) {
+	if targetID != "" {
+		for i, item := range a.items {
+			if item.ID == targetID {
+				a.cursor = i
+				return
+			}
+		}
+	}
+	// Clamp cursor to valid range
+	if a.cursor >= len(a.items) && len(a.items) > 0 {
+		a.cursor = len(a.items) - 1
+	}
+}
+
 // View renders the UI.
 func (a App) View() string {
 	if !a.ready {
@@ -657,7 +783,7 @@ func (a App) View() string {
 		contentHeight--
 	}
 
-	stream := RenderStream(a.items, a.cursor, a.width, contentHeight)
+	stream := RenderStream(a.items, a.cursor, a.width, contentHeight, !a.hasQuery())
 
 	errorBar := ""
 	if a.err != nil {
@@ -701,9 +827,9 @@ func (a App) renderSearchInput() string {
 func (a App) viewEmbedding() string {
 	query := a.filterInput.Value()
 
-	// Show the item list behind the status
+	// Show the item list behind the status (no time bands during search)
 	contentHeight := a.height - 2
-	stream := RenderStream(a.items, a.cursor, a.width, contentHeight)
+	stream := RenderStream(a.items, a.cursor, a.width, contentHeight, false)
 
 	status := fmt.Sprintf("  %s Searching for \"%s\"...", a.spinner.View(), query)
 	statusBar := StatusBar.Width(a.width).Render(status)
@@ -716,7 +842,7 @@ func (a App) viewBatchReranking() string {
 	query := a.filterInput.Value()
 
 	contentHeight := a.height - 2
-	stream := RenderStream(a.items, a.cursor, a.width, contentHeight)
+	stream := RenderStream(a.items, a.cursor, a.width, contentHeight, false)
 
 	status := fmt.Sprintf("  %s Reranking \"%s\"...", a.spinner.View(), truncateRunes(query, 30))
 	statusBar := StatusBar.Width(a.width).Render(status)
@@ -733,8 +859,8 @@ func (a App) viewWithRerankPanel() string {
 	}
 	contentHeight := a.height - progressHeight
 
-	// Render item stream in the top portion
-	stream := RenderStream(a.items, a.cursor, a.width, contentHeight)
+	// Render item stream in the top portion (no time bands during search)
+	stream := RenderStream(a.items, a.cursor, a.width, contentHeight, false)
 
 	// Render compact progress panel in the bottom portion
 	panel := a.renderRerankPanel(progressHeight)

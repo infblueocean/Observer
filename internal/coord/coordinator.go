@@ -160,37 +160,57 @@ func embedTextForItem(item store.Item) string {
 
 // embedItems generates and saves embeddings for the given items.
 // Uses batch embedding if available, otherwise falls back to sequential.
+// If batch embedding fails, falls back to sequential to avoid discarding the entire batch.
 func (c *Coordinator) embedItems(ctx context.Context, items []store.Item) {
 	if len(items) == 0 {
 		return
 	}
 
-	// Batch path: single API call for all items
-	if batcher, ok := c.embedder.(embed.BatchEmbedder); ok {
-		texts := make([]string, len(items))
-		for i, item := range items {
-			texts[i] = embedTextForItem(item)
+	// Build texts for all items, filtering out empty ones
+	type itemText struct {
+		item store.Item
+		text string
+	}
+	var pairs []itemText
+	for _, item := range items {
+		text := embedTextForItem(item)
+		if strings.TrimSpace(text) == "" {
+			log.Printf("coord: skipping embedding for %s (empty text)", item.ID)
+			continue
 		}
-		embeddings, err := batcher.EmbedBatch(ctx, texts)
-		if err != nil {
-			log.Printf("coord: batch embedding failed: %v", err)
-			return
-		}
-		for i, emb := range embeddings {
-			if ctx.Err() != nil {
-				return
-			}
-			if i < len(items) {
-				if err := c.store.SaveEmbedding(items[i].ID, emb); err != nil {
-					log.Printf("coord: failed to save embedding for %s: %v", items[i].ID, err)
-				}
-			}
-		}
+		pairs = append(pairs, itemText{item: item, text: text})
+	}
+	if len(pairs) == 0 {
 		return
 	}
 
-	// Sequential fallback (Ollama)
-	for _, item := range items {
+	// Batch path: single API call for all items
+	if batcher, ok := c.embedder.(embed.BatchEmbedder); ok {
+		texts := make([]string, len(pairs))
+		for i, p := range pairs {
+			texts[i] = p.text
+		}
+		embeddings, err := batcher.EmbedBatch(ctx, texts)
+		if err != nil {
+			log.Printf("coord: batch embedding failed, falling back to sequential: %v", err)
+			// Fall through to sequential path below
+		} else {
+			for i, emb := range embeddings {
+				if ctx.Err() != nil {
+					return
+				}
+				if i < len(pairs) {
+					if err := c.store.SaveEmbedding(pairs[i].item.ID, emb); err != nil {
+						log.Printf("coord: failed to save embedding for %s: %v", pairs[i].item.ID, err)
+					}
+				}
+			}
+			return
+		}
+	}
+
+	// Sequential fallback (Ollama, or batch failure)
+	for _, p := range pairs {
 		if ctx.Err() != nil {
 			return
 		}
@@ -198,15 +218,14 @@ func (c *Coordinator) embedItems(ctx context.Context, items []store.Item) {
 			return
 		}
 
-		text := embedTextForItem(item)
-
-		embedding, err := c.embedder.Embed(ctx, text)
+		embedding, err := c.embedder.Embed(ctx, p.text)
 		if err != nil {
+			log.Printf("coord: failed to embed %s: %v", p.item.ID, err)
 			continue
 		}
 
-		if err := c.store.SaveEmbedding(item.ID, embedding); err != nil {
-			log.Printf("coord: failed to save embedding for %s: %v", item.ID, err)
+		if err := c.store.SaveEmbedding(p.item.ID, embedding); err != nil {
+			log.Printf("coord: failed to save embedding for %s: %v", p.item.ID, err)
 		}
 	}
 }

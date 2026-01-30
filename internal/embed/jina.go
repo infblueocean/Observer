@@ -84,9 +84,10 @@ func (e *JinaEmbedder) EmbedBatch(ctx context.Context, texts []string) ([][]floa
 
 	results := make([][]float32, len(texts))
 
-	// Process in chunks of 100
-	for chunkStart := 0; chunkStart < len(texts); chunkStart += 100 {
-		chunkEnd := chunkStart + 100
+	// Process in chunks of 25 (smaller chunks = more reliable JSON responses)
+	const chunkSize = 25
+	for chunkStart := 0; chunkStart < len(texts); chunkStart += chunkSize {
+		chunkEnd := chunkStart + chunkSize
 		if chunkEnd > len(texts) {
 			chunkEnd = len(texts)
 		}
@@ -177,7 +178,7 @@ func (e *JinaEmbedder) doWithRetry(ctx context.Context, reqBody []byte) (*jinaEm
 			return nil, fmt.Errorf("embed: request failed: %w", err)
 		}
 
-		body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		body, err := io.ReadAll(io.LimitReader(resp.Body, 10<<20))
 		resp.Body.Close()
 		if err != nil {
 			return nil, fmt.Errorf("embed: failed to read response: %w", err)
@@ -187,7 +188,16 @@ func (e *JinaEmbedder) doWithRetry(ctx context.Context, reqBody []byte) (*jinaEm
 		if resp.StatusCode == http.StatusOK {
 			var embedResp jinaEmbedResponse
 			if err := json.Unmarshal(body, &embedResp); err != nil {
-				return nil, fmt.Errorf("embed: failed to parse response: %w", err)
+				// Truncated/malformed response — treat as retryable
+				lastErr = fmt.Errorf("embed: failed to parse response: %w", err)
+				if attempt < maxRetries {
+					select {
+					case <-ctx.Done():
+						return nil, fmt.Errorf("embed: request cancelled during retry: %w", ctx.Err())
+					case <-time.After(backoffs[attempt]):
+					}
+				}
+				continue
 			}
 			return &embedResp, nil
 		}

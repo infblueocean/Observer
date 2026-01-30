@@ -28,8 +28,9 @@ func TimeBand(published time.Time) string {
 }
 
 // RenderStream renders the item list with time bands.
+// When showBands is false (e.g. during search results), time band headers are suppressed.
 // Returns the rendered string for display.
-func RenderStream(items []store.Item, cursor int, width, height int) string {
+func RenderStream(items []store.Item, cursor int, width, height int, showBands bool) string {
 	if len(items) == 0 {
 		return HelpStyle.Render("No items to display. Press 'r' to refresh.")
 	}
@@ -56,15 +57,17 @@ func RenderStream(items []store.Item, cursor int, width, height int) string {
 			break
 		}
 
-		// Render time band header if band changes
-		band := TimeBand(item.Published)
-		if band != currentBand {
-			currentBand = band
-			if i >= scrollOffset {
-				header := TimeBandHeader.Render(band)
-				b.WriteString(header)
-				b.WriteString("\n")
-				renderedLines++
+		// Render time band header if band changes (only in chronological mode)
+		if showBands {
+			band := TimeBand(item.Published)
+			if band != currentBand {
+				currentBand = band
+				if i >= scrollOffset {
+					header := TimeBandHeader.Render(band)
+					b.WriteString(header)
+					b.WriteString("\n")
+					renderedLines++
+				}
 			}
 		}
 

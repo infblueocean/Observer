@@ -64,11 +64,15 @@ func Open(dbPath string) (*Store, error) {
 		return nil, fmt.Errorf("ping database: %w", err)
 	}
 
-	// Enable WAL mode for file-based databases (not :memory:)
+	// Enable WAL mode and busy timeout for file-based databases (not :memory:)
 	if dbPath != ":memory:" {
 		if _, err := db.Exec("PRAGMA journal_mode=WAL"); err != nil {
 			db.Close()
 			return nil, fmt.Errorf("enable WAL mode: %w", err)
+		}
+		if _, err := db.Exec("PRAGMA busy_timeout=5000"); err != nil {
+			db.Close()
+			return nil, fmt.Errorf("set busy timeout: %w", err)
 		}
 	}
 

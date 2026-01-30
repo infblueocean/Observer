@@ -166,9 +166,9 @@ func TestJinaEmbedBatchChunking(t *testing.T) {
 			return
 		}
 
-		// Verify each chunk is at most 100 items
-		if len(req.Input) > 100 {
-			t.Errorf("chunk size %d exceeds maximum of 100", len(req.Input))
+		// Verify each chunk is at most 25 items
+		if len(req.Input) > 25 {
+			t.Errorf("chunk size %d exceeds maximum of 25", len(req.Input))
 		}
 
 		resp := jinaEmbedResponse{
@@ -190,8 +190,8 @@ func TestJinaEmbedBatchChunking(t *testing.T) {
 	e.endpoint = server.URL
 	e.limiter = rate.NewLimiter(rate.Inf, 1)
 
-	// Create 250 texts, should result in 3 API calls (100 + 100 + 50)
-	texts := make([]string, 250)
+	// Create 75 texts, should result in 3 API calls (25 + 25 + 25)
+	texts := make([]string, 75)
 	for i := range texts {
 		texts[i] = fmt.Sprintf("text %d", i)
 	}
@@ -201,11 +201,11 @@ func TestJinaEmbedBatchChunking(t *testing.T) {
 		t.Fatalf("EmbedBatch() error = %v", err)
 	}
 
-	if len(results) != 250 {
-		t.Fatalf("EmbedBatch() returned %d results, want 250", len(results))
+	if len(results) != 75 {
+		t.Fatalf("EmbedBatch() returned %d results, want 75", len(results))
 	}
 
-	// Verify 3 API calls were made
+	// Verify 3 API calls were made (75 / 25 = 3 chunks)
 	if count := callCount.Load(); count != 3 {
 		t.Errorf("expected 3 API calls, got %d", count)
 	}

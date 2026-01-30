@@ -683,10 +683,15 @@ func TestCoordinatorBatchEmbedError(t *testing.T) {
 	}
 
 	mock := &mockProvider{items: testItems}
+	var singleEmbedCount int
 	embedder := &mockBatchEmbedder{
 		available: true,
 		embedBatchFunc: func(ctx context.Context, texts []string) ([][]float32, error) {
 			return nil, errors.New("batch embed failed")
+		},
+		embedFunc: func(ctx context.Context, text string) ([]float32, error) {
+			singleEmbedCount++
+			return []float32{0.1, 0.2, 0.3}, nil
 		},
 	}
 	coord := NewCoordinator(s, mock, embedder)
@@ -694,11 +699,122 @@ func TestCoordinatorBatchEmbedError(t *testing.T) {
 	ctx := context.Background()
 	coord.fetchAll(ctx, nil)
 
+	// After batch failure, sequential fallback should embed all items
+	if singleEmbedCount != 2 {
+		t.Errorf("expected 2 sequential embed calls after batch failure, got %d", singleEmbedCount)
+	}
 	for _, item := range testItems {
 		emb, _ := s.GetEmbedding(item.ID)
-		if emb != nil {
-			t.Errorf("expected no embedding for %s after batch error", item.ID)
+		if emb == nil {
+			t.Errorf("expected embedding for %s after sequential fallback", item.ID)
 		}
+	}
+}
+
+func TestCoordinatorBatchEmbedFallback(t *testing.T) {
+	// When batch fails but some items fail individually too,
+	// only successful items should get embeddings.
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("failed to open store: %v", err)
+	}
+	defer s.Close()
+
+	now := time.Now()
+	testItems := []store.Item{
+		{ID: "item1", SourceType: "rss", SourceName: "TestSource", Title: "Test 1", URL: "http://example.com/1", Published: now, Fetched: now},
+		{ID: "item2", SourceType: "rss", SourceName: "TestSource", Title: "Test 2", URL: "http://example.com/2", Published: now, Fetched: now},
+		{ID: "item3", SourceType: "rss", SourceName: "TestSource", Title: "Test 3", URL: "http://example.com/3", Published: now, Fetched: now},
+	}
+
+	mock := &mockProvider{items: testItems}
+	var singleCount int
+	embedder := &mockBatchEmbedder{
+		available: true,
+		embedBatchFunc: func(ctx context.Context, texts []string) ([][]float32, error) {
+			return nil, errors.New("batch embed failed")
+		},
+		embedFunc: func(ctx context.Context, text string) ([]float32, error) {
+			singleCount++
+			// Fail the second item individually
+			if singleCount == 2 {
+				return nil, errors.New("single embed failed")
+			}
+			return []float32{0.1, 0.2, 0.3}, nil
+		},
+	}
+	coord := NewCoordinator(s, mock, embedder)
+
+	ctx := context.Background()
+	coord.fetchAll(ctx, nil)
+
+	if singleCount != 3 {
+		t.Errorf("expected 3 sequential embed attempts, got %d", singleCount)
+	}
+
+	// item1 and item3 should have embeddings, item2 should not
+	emb1, _ := s.GetEmbedding("item1")
+	if emb1 == nil {
+		t.Error("expected embedding for item1")
+	}
+	emb2, _ := s.GetEmbedding("item2")
+	if emb2 != nil {
+		t.Error("expected no embedding for item2 (individual failure)")
+	}
+	emb3, _ := s.GetEmbedding("item3")
+	if emb3 == nil {
+		t.Error("expected embedding for item3")
+	}
+}
+
+func TestCoordinatorSkipsEmptyTexts(t *testing.T) {
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("failed to open store: %v", err)
+	}
+	defer s.Close()
+
+	now := time.Now()
+	testItems := []store.Item{
+		{ID: "item1", SourceType: "rss", SourceName: "TestSource", Title: "Test 1", URL: "http://example.com/1", Published: now, Fetched: now},
+		{ID: "item2", SourceType: "rss", SourceName: "TestSource", Title: "", Summary: "", URL: "http://example.com/2", Published: now, Fetched: now},
+		{ID: "item3", SourceType: "rss", SourceName: "TestSource", Title: "Test 3", URL: "http://example.com/3", Published: now, Fetched: now},
+	}
+
+	mock := &mockProvider{items: testItems}
+	var batchTexts []string
+	embedder := &mockBatchEmbedder{
+		available: true,
+		embedBatchFunc: func(ctx context.Context, texts []string) ([][]float32, error) {
+			batchTexts = texts
+			result := make([][]float32, len(texts))
+			for i := range texts {
+				result[i] = []float32{0.1, 0.2, 0.3}
+			}
+			return result, nil
+		},
+	}
+	coord := NewCoordinator(s, mock, embedder)
+
+	ctx := context.Background()
+	coord.fetchAll(ctx, nil)
+
+	// Only 2 texts should be sent to batch (item2 has empty text)
+	if len(batchTexts) != 2 {
+		t.Errorf("expected 2 texts in batch (empty filtered out), got %d", len(batchTexts))
+	}
+
+	emb1, _ := s.GetEmbedding("item1")
+	if emb1 == nil {
+		t.Error("expected embedding for item1")
+	}
+	emb2, _ := s.GetEmbedding("item2")
+	if emb2 != nil {
+		t.Error("expected no embedding for item2 (empty text)")
+	}
+	emb3, _ := s.GetEmbedding("item3")
+	if emb3 == nil {
+		t.Error("expected embedding for item3")
 	}
 }
 

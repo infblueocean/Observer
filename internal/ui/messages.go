@@ -47,3 +47,10 @@ type RerankComplete struct {
 	Scores []float32 // score per entry, indexed by rerankEntries position
 	Err    error
 }
+
+// SearchPoolLoaded is sent when the full item pool for search is ready.
+type SearchPoolLoaded struct {
+	Items      []store.Item
+	Embeddings map[string][]float32
+	Err        error
+}

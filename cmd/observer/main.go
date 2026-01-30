@@ -70,10 +70,52 @@ func main() {
 
 	// Create UI app with dependency injection
 	cfg := ui.AppConfig{
-		// loadItems: load from store with filters
+		// LoadRecentItems: Stage 1 — fast first paint (last 1h, unread only)
+		LoadRecentItems: func() tea.Cmd {
+			return func() tea.Msg {
+				since := time.Now().Add(-1 * time.Hour)
+				items, err := st.GetItemsSince(since)
+				if err != nil {
+					return ui.ItemsLoaded{Err: err}
+				}
+
+				// Filter out read items (GetItemsSince has no read filter)
+				unread := items[:0]
+				for _, item := range items {
+					if !item.Read {
+						unread = append(unread, item)
+					}
+				}
+				items = unread
+
+				// Same filter pipeline as LoadItems
+				ids := make([]string, len(items))
+				for i, item := range items {
+					ids[i] = item.ID
+				}
+				embeddings, err := st.GetItemsWithEmbeddings(ids)
+				if err != nil {
+					log.Printf("Warning: failed to get embeddings: %v", err)
+					embeddings = make(map[string][]float32)
+				}
+
+				items = filter.SemanticDedup(items, embeddings, 0.85)
+				items = filter.LimitPerSource(items, 50)
+
+				filteredEmbeddings := make(map[string][]float32)
+				for _, item := range items {
+					if emb, ok := embeddings[item.ID]; ok {
+						filteredEmbeddings[item.ID] = emb
+					}
+				}
+
+				return ui.ItemsLoaded{Items: items, Embeddings: filteredEmbeddings}
+			}
+		},
+		// LoadItems: Stage 2 — full 24h corpus (also used by refresh/fetch)
 		LoadItems: func() tea.Cmd {
 			return func() tea.Msg {
-				items, err := st.GetItems(500, false)
+				items, err := st.GetItems(10000, false)
 				if err != nil {
 					return ui.ItemsLoaded{Err: err}
 				}
@@ -105,6 +147,35 @@ func main() {
 				}
 
 				return ui.ItemsLoaded{Items: items, Embeddings: filteredEmbeddings}
+			}
+		},
+		// LoadSearchPool: load all items for full-history search
+		LoadSearchPool: func() tea.Cmd {
+			return func() tea.Msg {
+				items, err := st.GetItems(10000, true) // include read items
+				if err != nil {
+					return ui.SearchPoolLoaded{Err: err}
+				}
+				// No age filter, no LimitPerSource — search needs everything
+				ids := make([]string, len(items))
+				for i, item := range items {
+					ids[i] = item.ID
+				}
+				embeddings, err := st.GetItemsWithEmbeddings(ids)
+				if err != nil {
+					log.Printf("Warning: failed to get embeddings for search pool: %v", err)
+					embeddings = make(map[string][]float32)
+				}
+				// Dedup only (no source limiting for search)
+				items = filter.SemanticDedup(items, embeddings, 0.85)
+
+				filteredEmbeddings := make(map[string][]float32)
+				for _, item := range items {
+					if emb, ok := embeddings[item.ID]; ok {
+						filteredEmbeddings[item.ID] = emb
+					}
+				}
+				return ui.SearchPoolLoaded{Items: items, Embeddings: filteredEmbeddings}
 			}
 		},
 		// markRead
