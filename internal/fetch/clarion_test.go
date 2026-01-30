@@ -123,3 +123,62 @@ func TestConvertItem_HashDeterminism(t *testing.T) {
 		t.Errorf("expected deterministic ID: %q != %q", item1.ID, item2.ID)
 	}
 }
+
+// --- truncate() tests ---
+
+func TestTruncate(t *testing.T) {
+	tests := []struct {
+		name   string
+		input  string
+		maxLen int
+		want   string
+	}{
+		{"short_string", "hello", 10, "hello"},
+		{"exact_length", "hello", 5, "hello"},
+		{"needs_truncation", "hello world", 8, "hello..."},
+		{"maxLen_3", "hello", 3, "hel"},
+		{"maxLen_1", "hello", 1, "h"},
+		{"maxLen_4", "hello", 4, "h..."},
+		{"empty_string", "", 5, ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := truncate(tt.input, tt.maxLen)
+			if got != tt.want {
+				t.Errorf("truncate(%q, %d) = %q, want %q", tt.input, tt.maxLen, got, tt.want)
+			}
+		})
+	}
+}
+
+// --- NewClarionProvider tests ---
+
+func TestNewClarionProvider_NilSources(t *testing.T) {
+	p := NewClarionProvider(nil, clarion.FetchOptions{}, nil)
+	if len(p.sources) == 0 {
+		t.Fatal("expected non-empty sources when nil passed (should use AllSources)")
+	}
+	allSources := clarion.AllSources()
+	if len(p.sources) != len(allSources) {
+		t.Errorf("sources count = %d, want %d (AllSources)", len(p.sources), len(allSources))
+	}
+}
+
+func TestNewClarionProvider_ExplicitSources(t *testing.T) {
+	src := clarion.AllSources()
+	if len(src) == 0 {
+		t.Skip("no clarion sources available")
+	}
+	p := NewClarionProvider(src[:1], clarion.FetchOptions{}, nil)
+	if len(p.sources) != 1 {
+		t.Errorf("sources count = %d, want 1", len(p.sources))
+	}
+}
+
+func TestNewClarionProvider_NilLogger(t *testing.T) {
+	p := NewClarionProvider(nil, clarion.FetchOptions{}, nil)
+	if p.logger == nil {
+		t.Error("expected non-nil logger when nil passed (should use NullLogger)")
+	}
+}
