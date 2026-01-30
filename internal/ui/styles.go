@@ -8,6 +8,7 @@ var (
 	colorSecondary = lipgloss.Color("241") // Gray
 	colorMuted     = lipgloss.Color("240") // Darker gray
 	colorHighlight = lipgloss.Color("212") // Pink
+	colorSpinner   = lipgloss.Color("205") // Magenta-pink
 )
 
 // SelectedItem style for the currently highlighted item.
@@ -86,4 +87,18 @@ var FilterBarText = lipgloss.NewStyle().
 // FilterBarCount style for the filtered count.
 var FilterBarCount = lipgloss.NewStyle().
 	Foreground(colorSecondary)
+
+// DebugPanel style for the debug overlay.
+var DebugPanel = lipgloss.NewStyle().
+	Border(lipgloss.RoundedBorder()).
+	BorderForeground(lipgloss.Color("63")).
+	Foreground(lipgloss.Color("252")).
+	Background(lipgloss.Color("235")).
+	Padding(1, 2)
+
+// DebugHeaderStyle for section headers in the debug panel.
+var DebugHeaderStyle = lipgloss.NewStyle().
+	Bold(true).
+	Foreground(colorHighlight).
+	MarginBottom(0)
 

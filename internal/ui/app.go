@@ -1,12 +1,15 @@
 package ui
 
 import (
+	"crypto/rand"
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/abelbrown/observer/internal/filter"
+	"github.com/abelbrown/observer/internal/otel"
 	"github.com/abelbrown/observer/internal/store"
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textinput"
@@ -14,17 +17,25 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
+// newQueryID generates a short random hex string for search correlation.
+// 8 bytes = 16 hex chars. Unique within and across sessions.
+func newQueryID() string {
+	var b [8]byte
+	_, _ = rand.Read(b[:])
+	return fmt.Sprintf("%x", b[:])
+}
+
 // App is the root Bubble Tea model.
 // IMPORTANT: App does NOT hold *store.Store. It receives items via messages.
 type App struct {
 	loadItems       func() tea.Cmd
 	loadRecentItems func() tea.Cmd // loads last 1h (fast first paint)
-	loadSearchPool  func() tea.Cmd // loads all items for search
+	loadSearchPool  func(queryID string) tea.Cmd // loads all items for search
 	markRead        func(id string) tea.Cmd
 	triggerFetch    func() tea.Cmd
-	embedQuery      func(query string) tea.Cmd
-	scoreEntry      func(query string, doc string, index int) tea.Cmd // score single entry
-	batchRerank     func(query string, docs []string) tea.Cmd         // batch rerank all docs at once
+	embedQuery      func(query string, queryID string) tea.Cmd
+	scoreEntry  func(query string, doc string, index int, queryID string) tea.Cmd // Ollama per-entry path (not wired in production; Jina batch path used instead)
+	batchRerank func(query string, docs []string, queryID string) tea.Cmd         // Jina batch rerank — single API call for all docs
 
 	items      []store.Item
 	embeddings map[string][]float32 // item ID -> embedding
@@ -34,7 +45,8 @@ type App struct {
 	height     int
 	ready      bool
 	loading    bool
-	statusText string // activity status for status bar; empty = no activity
+	statusText  string    // activity status for status bar; empty = no activity
+	searchStart time.Time // when current search was initiated
 
 	// Two-stage loading
 	fullLoaded bool // true after Stage 2 completes
@@ -55,6 +67,9 @@ type App struct {
 	embeddingPending  bool      // true while waiting for query embedding
 	lastEmbeddedQuery string    // the query that was last embedded
 
+	// Search correlation
+	queryID string // current search correlation ID; empty when no search active
+
 	// Rerank progress (package-manager style)
 	rerankPending  bool         // true during reranking
 	rerankEntries  []store.Item // entries being reranked
@@ -64,19 +79,31 @@ type App struct {
 
 	// UI components
 	spinner  spinner.Model
+
+	// Observability
+	logger       *otel.Logger
+	ring         *otel.RingBuffer
+	debugVisible bool
+}
+
+// ObsConfig groups observability dependencies to prevent AppConfig god-object growth.
+type ObsConfig struct {
+	Logger *otel.Logger
+	Ring   *otel.RingBuffer
 }
 
 // AppConfig holds the configuration for creating a new App.
 type AppConfig struct {
 	LoadItems       func() tea.Cmd
 	LoadRecentItems func() tea.Cmd
-	LoadSearchPool  func() tea.Cmd
+	LoadSearchPool  func(queryID string) tea.Cmd
 	MarkRead        func(id string) tea.Cmd
 	TriggerFetch    func() tea.Cmd
-	EmbedQuery      func(query string) tea.Cmd
-	ScoreEntry      func(query string, doc string, index int) tea.Cmd
-	BatchRerank     func(query string, docs []string) tea.Cmd
+	EmbedQuery      func(query string, queryID string) tea.Cmd
+	ScoreEntry      func(query string, doc string, index int, queryID string) tea.Cmd
+	BatchRerank     func(query string, docs []string, queryID string) tea.Cmd
 	Embeddings      map[string][]float32
+	Obs             ObsConfig
 }
 
 // NewApp creates a new App with the given command functions.
@@ -101,11 +128,16 @@ func newApp(cfg AppConfig) App {
 
 	s := spinner.New()
 	s.Spinner = spinner.Dot
-	s.Style = lipgloss.NewStyle().Foreground(lipgloss.Color("205"))
+	s.Style = lipgloss.NewStyle().Foreground(colorSpinner)
 
 	embeddings := cfg.Embeddings
 	if embeddings == nil {
 		embeddings = make(map[string][]float32)
+	}
+
+	logger := cfg.Obs.Logger
+	if logger == nil {
+		logger = otel.NewNullLogger()
 	}
 
 	return App{
@@ -121,6 +153,8 @@ func newApp(cfg AppConfig) App {
 		filterInput:     ti,
 		embeddings:      embeddings,
 		spinner:         s,
+		logger:          logger,
+		ring:            cfg.Obs.Ring,
 	}
 }
 
@@ -139,6 +173,11 @@ func (a App) Init() tea.Cmd {
 
 // Update handles messages and returns the updated model and any commands.
 func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if otel.TraceEnabled() {
+		a.traceMsg(msg)
+		defer a.traceHandled(time.Now())
+	}
+
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
 		return a.handleKeyMsg(msg)
@@ -214,6 +253,10 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, nil
 
 	case QueryEmbedded:
+		// Stale check first: don't clear state for old queries
+		if msg.QueryID != "" && msg.QueryID != a.queryID {
+			return a, nil
+		}
 		a.embeddingPending = false
 		if msg.Err != nil {
 			a.statusText = ""
@@ -221,9 +264,11 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if msg.Query == a.filterInput.Value() {
 			a.queryEmbedding = msg.Embedding
+			a.logger.Emit(otel.Event{Kind: otel.KindQueryEmbed, Level: otel.LevelInfo, Comp: "ui", Dur: time.Since(a.searchStart), Dims: len(msg.Embedding), Query: msg.Query})
 			a.lastEmbeddedQuery = msg.Query
 			// Always apply fast cosine reranking for immediate feedback
 			a.rerankItemsByEmbedding()
+			a.logger.Emit(otel.Event{Kind: otel.KindCosineRerank, Level: otel.LevelInfo, Comp: "ui", Dur: time.Since(a.searchStart), Count: len(a.items), Query: a.filterInput.Value()})
 			// Only start cross-encoder if search pool has already arrived
 			if !a.searchPoolPending {
 				return a.startReranking(msg.Query)
@@ -233,6 +278,10 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case SearchPoolLoaded:
 		a.searchPoolPending = false
+		// Stale check: QueryID
+		if msg.QueryID != "" && msg.QueryID != a.queryID {
+			return a, nil
+		}
 		// Discard if no active query (user pressed Esc before pool arrived)
 		if !a.hasQuery() {
 			return a, nil
@@ -252,6 +301,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		a.items = msg.Items
 		a.embeddings = msg.Embeddings
+		a.logger.Emit(otel.Event{Kind: otel.KindSearchPool, Level: otel.LevelInfo, Comp: "ui", Dur: time.Since(a.searchStart), Count: len(msg.Items), Query: a.filterInput.Value(), Extra: map[string]any{"embeddings": len(msg.Embeddings)}})
 		// If query embedding already arrived, apply full reranking now
 		if len(a.queryEmbedding) > 0 {
 			a.rerankItemsByEmbedding()
@@ -266,12 +316,18 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !a.rerankPending {
 			return a, nil
 		}
-		// Stale check: ignore results from old queries
-		if msg.Query != a.filterInput.Value() {
+		// Stale check: QueryID is authoritative when present
+		if msg.QueryID != "" {
+			if msg.QueryID != a.queryID {
+				return a, nil
+			}
+		} else if msg.Query != a.filterInput.Value() {
+			// Fallback: text comparison when no QueryID
 			return a, nil
 		}
 		a.rerankPending = false
 		a.statusText = ""
+		a.logger.Emit(otel.Event{Kind: otel.KindSearchComplete, Level: otel.LevelInfo, Comp: "ui", Dur: time.Since(a.searchStart), Query: a.filterInput.Value()})
 		if msg.Err != nil {
 			a.err = msg.Err
 			a.rerankEntries = nil
@@ -288,6 +344,10 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.rerankProgress = len(a.rerankEntries)
 			a.applyScoresAsOrder()
 		}
+		// D9: clear rerank state after success
+		a.rerankEntries = nil
+		a.rerankScores = nil
+		a.rerankProgress = 0
 		return a, nil
 
 	case ItemMarkedRead:
@@ -338,13 +398,17 @@ func (a App) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return a.handleSearchInput(msg)
 	}
 
-	// During embedding, only allow Esc to cancel
+	// During embedding, only allow Esc to cancel and D to toggle debug
 	if a.embeddingPending {
 		switch msg.Type {
 		case tea.KeyEsc:
 			return a.clearSearch()
 		case tea.KeyCtrlC:
 			return a, tea.Quit
+		}
+		if msg.String() == "D" {
+			a.debugVisible = !a.debugVisible
+			return a, nil
 		}
 		return a, nil
 	}
@@ -374,6 +438,9 @@ func (a App) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return a.handleHome()
 		case "G":
 			return a.handleEnd()
+		case "D":
+			a.debugVisible = !a.debugVisible
+			return a, nil
 		}
 		return a, nil
 	}
@@ -428,6 +495,9 @@ func (a App) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return a.handleHome()
 	case "G":
 		return a.handleEnd()
+	case "D":
+		a.debugVisible = !a.debugVisible
+		return a, nil
 	}
 
 	return a, nil
@@ -485,15 +555,26 @@ func (a App) submitSearch() (tea.Model, tea.Cmd) {
 		a.savedEmbeddings[k] = v
 	}
 
+	a.searchStart = time.Now()
+	a.queryID = newQueryID()
+
+	a.logger.Emit(otel.Event{
+		Kind:    otel.KindSearchStart,
+		Level:   otel.LevelInfo,
+		Comp:    "ui",
+		QueryID: a.queryID,
+		Query:   query,
+	})
+
 	// Load full search pool + embed query in parallel
 	var cmds []tea.Cmd
 	if a.loadSearchPool != nil {
 		a.searchPoolPending = true
-		cmds = append(cmds, a.loadSearchPool())
+		cmds = append(cmds, a.loadSearchPool(a.queryID))
 	}
 	if a.embedQuery != nil {
 		a.embeddingPending = true
-		cmds = append(cmds, a.embedQuery(query))
+		cmds = append(cmds, a.embedQuery(query, a.queryID))
 	}
 	if len(cmds) > 0 {
 		a.statusText = fmt.Sprintf("Searching for \"%s\"...", truncateRunes(query, 30))
@@ -511,6 +592,8 @@ func (a App) submitSearch() (tea.Model, tea.Cmd) {
 
 // clearSearch clears the search state and restores original order.
 func (a App) clearSearch() (tea.Model, tea.Cmd) {
+	a.logger.Emit(otel.Event{Kind: otel.KindSearchCancel, Level: otel.LevelInfo, Comp: "ui", QueryID: a.queryID})
+
 	a.searchActive = false
 	a.filterInput.SetValue("")
 	a.filterInput.Blur()
@@ -524,6 +607,8 @@ func (a App) clearSearch() (tea.Model, tea.Cmd) {
 	a.rerankScores = nil
 	a.rerankProgress = 0
 	a.statusText = ""
+	a.searchStart = time.Time{}
+	a.queryID = ""
 
 	// Restore chronological view
 	if a.savedItems != nil {
@@ -558,6 +643,7 @@ func (a App) startReranking(query string) (tea.Model, tea.Cmd) {
 	a.rerankPending = true
 	a.rerankQuery = query
 	a.statusText = fmt.Sprintf("Reranking \"%s\"...", truncateRunes(query, 30))
+	a.logger.Emit(otel.Event{Kind: otel.KindCrossEncoder, Level: otel.LevelInfo, Comp: "ui", Count: topN, Query: query, Extra: map[string]any{"batch": a.batchRerank != nil}})
 	a.rerankEntries = make([]store.Item, topN)
 	copy(a.rerankEntries, a.items[:topN])
 	a.rerankScores = make([]float32, topN)
@@ -569,7 +655,7 @@ func (a App) startReranking(query string) (tea.Model, tea.Cmd) {
 		for i := 0; i < topN; i++ {
 			docs[i] = entryText(a.rerankEntries[i])
 		}
-		return a, tea.Batch(a.spinner.Tick, a.batchRerank(query, docs))
+		return a, tea.Batch(a.spinner.Tick, a.batchRerank(query, docs, a.queryID))
 	}
 
 	// Per-entry path: fire ALL entries in parallel (Ollama)
@@ -577,7 +663,7 @@ func (a App) startReranking(query string) (tea.Model, tea.Cmd) {
 	cmds[0] = a.spinner.Tick
 	for i := 0; i < topN; i++ {
 		doc := entryText(a.rerankEntries[i])
-		cmds[i+1] = a.scoreEntry(query, doc, i)
+		cmds[i+1] = a.scoreEntry(query, doc, i, a.queryID)
 	}
 	return a, tea.Batch(cmds...)
 }
@@ -585,6 +671,11 @@ func (a App) startReranking(query string) (tea.Model, tea.Cmd) {
 // handleEntryReranked processes a single entry's rerank score.
 func (a App) handleEntryReranked(msg EntryReranked) (tea.Model, tea.Cmd) {
 	if !a.rerankPending {
+		return a, nil
+	}
+
+	// Stale check: QueryID takes precedence if available
+	if msg.QueryID != "" && msg.QueryID != a.queryID {
 		return a, nil
 	}
 
@@ -603,7 +694,11 @@ func (a App) handleEntryReranked(msg EntryReranked) (tea.Model, tea.Cmd) {
 	if a.rerankProgress >= len(a.rerankEntries) {
 		a.rerankPending = false
 		a.statusText = ""
+		a.logger.Emit(otel.Event{Kind: otel.KindSearchComplete, Level: otel.LevelInfo, Comp: "ui", Dur: time.Since(a.searchStart), Count: len(a.rerankEntries)})
 		a.applyScoresAsOrder()
+		a.rerankEntries = nil
+		a.rerankScores = nil
+		a.rerankProgress = 0
 		return a, nil
 	}
 
@@ -754,6 +849,14 @@ func (a App) View() string {
 		return "Loading..."
 	}
 
+	// Debug overlay: full takeover
+	if a.debugVisible && a.ring != nil {
+		contentHeight := a.height - 2 // -1 status bar, -1 newline separator
+		overlay := debugOverlay(a.ring, a.width, contentHeight)
+		statusBar := debugStatusBar(a.width)
+		return overlay + "\n" + statusBar
+	}
+
 	contentHeight := a.height - 1
 	if a.err != nil {
 		contentHeight--
@@ -836,4 +939,81 @@ func (a App) Cursor() int {
 // Items returns the current items (for testing).
 func (a App) Items() []store.Item {
 	return a.items
+}
+
+// traceMsg logs a trace event for the incoming message.
+// Only called when OBSERVER_TRACE is set.
+// Uses exhaustive type switch with %T for unknown types (never %+v).
+func (a App) traceMsg(msg tea.Msg) {
+	e := otel.Event{
+		Kind:  otel.KindMsgReceived,
+		Level: otel.LevelDebug,
+		Comp:  "trace",
+	}
+
+	var typeName string
+	switch m := msg.(type) {
+	case tea.KeyMsg:
+		typeName = "KeyMsg"
+		e.Extra = map[string]any{"key": m.String()}
+	case tea.WindowSizeMsg:
+		typeName = "WindowSizeMsg"
+		e.Extra = map[string]any{"w": m.Width, "h": m.Height}
+	case spinner.TickMsg:
+		typeName = "spinner.TickMsg"
+	case ItemsLoaded:
+		typeName = "ItemsLoaded"
+		e.Count = len(m.Items)
+		if m.Err != nil {
+			e.Err = m.Err.Error()
+		}
+	case FetchComplete:
+		typeName = "FetchComplete"
+		e.Source = m.Source
+		e.Count = m.NewItems
+		if m.Err != nil {
+			e.Err = m.Err.Error()
+		}
+	case QueryEmbedded:
+		typeName = "QueryEmbedded"
+		e.Query = m.Query
+		e.QueryID = m.QueryID
+		e.Dims = len(m.Embedding)
+	case SearchPoolLoaded:
+		typeName = "SearchPoolLoaded"
+		e.QueryID = m.QueryID
+		e.Count = len(m.Items)
+	case RerankComplete:
+		typeName = "RerankComplete"
+		e.QueryID = m.QueryID
+		e.Query = m.Query
+	case EntryReranked:
+		typeName = "EntryReranked"
+		e.QueryID = m.QueryID
+		e.Extra = map[string]any{"index": m.Index, "score": m.Score}
+	case ItemMarkedRead:
+		typeName = "ItemMarkedRead"
+		e.Source = m.ID
+	case RefreshTick:
+		typeName = "RefreshTick"
+	default:
+		// %T gives the type name without allocating the full value string.
+		// NEVER use %+v here — it triggers full reflection and can allocate
+		// megabytes on large message types (e.g., SearchPoolLoaded with 2000 items).
+		typeName = fmt.Sprintf("%T", msg)
+	}
+
+	e.Msg = typeName
+	a.logger.Emit(e)
+}
+
+// traceHandled logs a trace event recording how long Update() took.
+// Only called via defer when OBSERVER_TRACE is set.
+func (a App) traceHandled(startTime time.Time) {
+	a.logger.Emit(otel.Event{
+		Kind:  otel.KindMsgHandled,
+		Level: otel.LevelDebug,
+		Comp:  "trace",
+		Dur:   time.Since(startTime),
+	})
 }

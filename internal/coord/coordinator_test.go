@@ -38,7 +38,7 @@ func TestCoordinatorRespectsContextCancellation(t *testing.T) {
 	defer s.Close()
 
 	mock := &mockProvider{delay: 100 * time.Millisecond}
-	coord := NewCoordinator(s, mock, nil)
+	coord := NewCoordinator(s, mock, nil, nil)
 
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -67,7 +67,7 @@ func TestCoordinatorHandlesFetchTimeout(t *testing.T) {
 	defer s.Close()
 
 	mock := &mockProvider{delay: 5 * time.Second}
-	coord := NewCoordinator(s, mock, nil)
+	coord := NewCoordinator(s, mock, nil, nil)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
@@ -110,7 +110,7 @@ func TestCoordinatorSavesItems(t *testing.T) {
 	}
 
 	mock := &mockProvider{items: testItems}
-	coord := NewCoordinator(s, mock, nil)
+	coord := NewCoordinator(s, mock, nil, nil)
 
 	ctx := context.Background()
 	coord.fetchAll(ctx, nil)
@@ -133,7 +133,7 @@ func TestCoordinatorStartAndWait(t *testing.T) {
 	defer s.Close()
 
 	mock := &mockProvider{}
-	coord := NewCoordinator(s, mock, nil)
+	coord := NewCoordinator(s, mock, nil, nil)
 
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -169,7 +169,7 @@ func TestCoordinatorHandlesNilProgram(t *testing.T) {
 	defer s.Close()
 
 	mock := &mockProvider{}
-	coord := NewCoordinator(s, mock, nil)
+	coord := NewCoordinator(s, mock, nil, nil)
 
 	ctx := context.Background()
 	coord.fetchAll(ctx, nil)
@@ -188,7 +188,7 @@ func TestCoordinatorHandlesFetchError(t *testing.T) {
 	defer s.Close()
 
 	mock := &mockProvider{err: errors.New("fetch failed")}
-	coord := NewCoordinator(s, mock, nil)
+	coord := NewCoordinator(s, mock, nil, nil)
 
 	ctx := context.Background()
 	coord.fetchAll(ctx, nil)
@@ -249,7 +249,7 @@ func TestCoordinatorEmbedsAfterFetch(t *testing.T) {
 			return []float32{0.1, 0.2, 0.3}, nil
 		},
 	}
-	coord := NewCoordinator(s, mock, embedder)
+	coord := NewCoordinator(s, mock, embedder, nil)
 
 	ctx := context.Background()
 	coord.fetchAll(ctx, nil)
@@ -306,7 +306,7 @@ func TestCoordinatorSkipsEmbeddingWhenUnavailable(t *testing.T) {
 			return []float32{0.1, 0.2, 0.3}, nil
 		},
 	}
-	coord := NewCoordinator(s, mock, embedder)
+	coord := NewCoordinator(s, mock, embedder, nil)
 
 	ctx := context.Background()
 	coord.fetchAll(ctx, nil)
@@ -343,7 +343,7 @@ func TestCoordinatorRespectsCancellationDuringEmbedding(t *testing.T) {
 			return []float32{0.1, 0.2, 0.3}, nil
 		},
 	}
-	coord := NewCoordinator(s, mock, embedder)
+	coord := NewCoordinator(s, mock, embedder, nil)
 
 	coord.fetchAll(ctx, nil)
 
@@ -377,7 +377,7 @@ func TestCoordinatorHandlesEmbedErrors(t *testing.T) {
 			return []float32{0.1, 0.2, 0.3}, nil
 		},
 	}
-	coord := NewCoordinator(s, mock, embedder)
+	coord := NewCoordinator(s, mock, embedder, nil)
 
 	ctx := context.Background()
 	coord.fetchAll(ctx, nil)
@@ -410,7 +410,7 @@ func TestCoordinatorSkipsEmbeddingWhenNilEmbedder(t *testing.T) {
 	}
 
 	mock := &mockProvider{items: testItems}
-	coord := NewCoordinator(s, mock, nil)
+	coord := NewCoordinator(s, mock, nil, nil)
 
 	ctx := context.Background()
 	coord.fetchAll(ctx, nil)
@@ -453,7 +453,7 @@ func TestCoordinatorStopsWhenOllamaDisappears(t *testing.T) {
 			}
 			return []float32{0.1, 0.2, 0.3}, nil
 		},
-	})
+	}, nil)
 
 	ctx := context.Background()
 	coord.fetchAll(ctx, nil)
@@ -508,7 +508,7 @@ func TestCoordinatorEmbeddingWorkerProcessesItems(t *testing.T) {
 	}
 
 	mock := &mockProvider{}
-	coord := NewCoordinator(s, mock, embedder)
+	coord := NewCoordinator(s, mock, embedder, nil)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	coord.StartEmbeddingWorker(ctx)
@@ -567,7 +567,7 @@ func TestCoordinatorEmbeddingWorkerRespectsContext(t *testing.T) {
 	}
 
 	mock := &mockProvider{}
-	coord := NewCoordinator(s, mock, embedder)
+	coord := NewCoordinator(s, mock, embedder, nil)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	coord.StartEmbeddingWorker(ctx)
@@ -646,7 +646,7 @@ func TestCoordinatorUsesBatchEmbedder(t *testing.T) {
 			return result, nil
 		},
 	}
-	coord := NewCoordinator(s, mock, embedder)
+	coord := NewCoordinator(s, mock, embedder, nil)
 
 	ctx := context.Background()
 	coord.fetchAll(ctx, nil)
@@ -694,7 +694,7 @@ func TestCoordinatorBatchEmbedError(t *testing.T) {
 			return []float32{0.1, 0.2, 0.3}, nil
 		},
 	}
-	coord := NewCoordinator(s, mock, embedder)
+	coord := NewCoordinator(s, mock, embedder, nil)
 
 	ctx := context.Background()
 	coord.fetchAll(ctx, nil)
@@ -743,7 +743,7 @@ func TestCoordinatorBatchEmbedFallback(t *testing.T) {
 			return []float32{0.1, 0.2, 0.3}, nil
 		},
 	}
-	coord := NewCoordinator(s, mock, embedder)
+	coord := NewCoordinator(s, mock, embedder, nil)
 
 	ctx := context.Background()
 	coord.fetchAll(ctx, nil)
@@ -794,7 +794,7 @@ func TestCoordinatorSkipsEmptyTexts(t *testing.T) {
 			return result, nil
 		},
 	}
-	coord := NewCoordinator(s, mock, embedder)
+	coord := NewCoordinator(s, mock, embedder, nil)
 
 	ctx := context.Background()
 	coord.fetchAll(ctx, nil)
@@ -845,7 +845,7 @@ func TestCoordinatorEmbeddingWorkerSkipsWhenUnavailable(t *testing.T) {
 	}
 
 	mock := &mockProvider{}
-	coord := NewCoordinator(s, mock, embedder)
+	coord := NewCoordinator(s, mock, embedder, nil)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	coord.StartEmbeddingWorker(ctx)

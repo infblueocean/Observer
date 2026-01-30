@@ -29,28 +29,32 @@ type RefreshTick struct{}
 type QueryEmbedded struct {
 	Query     string
 	Embedding []float32
+	QueryID   string // search correlation ID
 	Err       error
 }
 
 // EntryReranked is sent when a single entry has been scored by the cross-encoder.
 // Used for package-manager style progress feedback.
 type EntryReranked struct {
-	Index int     // Index into the reranking batch
-	Score float32 // Relevance score in [0, 1]
-	Err   error
+	Index   int     // Index into the reranking batch
+	Score   float32 // Relevance score in [0, 1]
+	QueryID string  // search correlation ID
+	Err     error
 }
 
 // RerankComplete is sent when batch reranking finishes (Jina API path).
 // Contains all scores at once, unlike EntryReranked which arrives one at a time.
 type RerankComplete struct {
-	Query  string    // query that was reranked (for stale-check)
-	Scores []float32 // score per entry, indexed by rerankEntries position
-	Err    error
+	Query   string    // query that was reranked (for stale-check)
+	Scores  []float32 // score per entry, indexed by rerankEntries position
+	QueryID string    // search correlation ID
+	Err     error
 }
 
 // SearchPoolLoaded is sent when the full item pool for search is ready.
 type SearchPoolLoaded struct {
 	Items      []store.Item
 	Embeddings map[string][]float32
+	QueryID    string // search correlation ID
 	Err        error
 }

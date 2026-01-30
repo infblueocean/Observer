@@ -3,7 +3,6 @@ package coord
 
 import (
 	"context"
-	"log"
 	"regexp"
 	"strings"
 	"sync"
@@ -12,6 +11,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/abelbrown/observer/internal/embed"
+	"github.com/abelbrown/observer/internal/otel"
 	"github.com/abelbrown/observer/internal/store"
 	"github.com/abelbrown/observer/internal/ui"
 )
@@ -36,16 +36,21 @@ type Coordinator struct {
 	store    *store.Store
 	provider Provider
 	embedder embed.Embedder // optional: nil to disable embedding
+	logger   *otel.Logger
 	wg       sync.WaitGroup
 }
 
 // NewCoordinator creates a Coordinator with the given provider.
 // The embedder is optional (nil to disable embedding).
-func NewCoordinator(s *store.Store, p Provider, e embed.Embedder) *Coordinator {
+func NewCoordinator(s *store.Store, p Provider, e embed.Embedder, l *otel.Logger) *Coordinator {
+	if l == nil {
+		l = otel.NewNullLogger()
+	}
 	return &Coordinator{
 		store:    s,
 		provider: p,
 		embedder: e,
+		logger:   l,
 	}
 }
 
@@ -175,7 +180,7 @@ func (c *Coordinator) embedItems(ctx context.Context, items []store.Item) {
 	for _, item := range items {
 		text := embedTextForItem(item)
 		if strings.TrimSpace(text) == "" {
-			log.Printf("coord: skipping embedding for %s (empty text)", item.ID)
+			c.logger.Emit(otel.Event{Kind: otel.KindEmbedError, Level: otel.LevelWarn, Comp: "coord", Source: item.ID, Msg: "skipping embedding: empty text"})
 			continue
 		}
 		pairs = append(pairs, itemText{item: item, text: text})
@@ -192,7 +197,7 @@ func (c *Coordinator) embedItems(ctx context.Context, items []store.Item) {
 		}
 		embeddings, err := batcher.EmbedBatch(ctx, texts)
 		if err != nil {
-			log.Printf("coord: batch embedding failed, falling back to sequential: %v", err)
+			c.logger.Emit(otel.Event{Kind: otel.KindEmbedError, Level: otel.LevelError, Comp: "coord", Msg: "batch embedding failed, falling back to sequential", Err: err.Error()})
 			// Fall through to sequential path below
 		} else {
 			for i, emb := range embeddings {
@@ -201,7 +206,7 @@ func (c *Coordinator) embedItems(ctx context.Context, items []store.Item) {
 				}
 				if i < len(pairs) {
 					if err := c.store.SaveEmbedding(pairs[i].item.ID, emb); err != nil {
-						log.Printf("coord: failed to save embedding for %s: %v", pairs[i].item.ID, err)
+						c.logger.Emit(otel.Event{Kind: otel.KindError, Level: otel.LevelError, Comp: "coord", Source: pairs[i].item.ID, Msg: "failed to save embedding", Err: err.Error()})
 					}
 				}
 			}
@@ -220,12 +225,12 @@ func (c *Coordinator) embedItems(ctx context.Context, items []store.Item) {
 
 		embedding, err := c.embedder.Embed(ctx, p.text)
 		if err != nil {
-			log.Printf("coord: failed to embed %s: %v", p.item.ID, err)
+			c.logger.Emit(otel.Event{Kind: otel.KindEmbedError, Level: otel.LevelError, Comp: "coord", Source: p.item.ID, Err: err.Error()})
 			continue
 		}
 
 		if err := c.store.SaveEmbedding(p.item.ID, embedding); err != nil {
-			log.Printf("coord: failed to save embedding for %s: %v", p.item.ID, err)
+			c.logger.Emit(otel.Event{Kind: otel.KindError, Level: otel.LevelError, Comp: "coord", Source: p.item.ID, Msg: "failed to save embedding", Err: err.Error()})
 		}
 	}
 }
@@ -236,6 +241,9 @@ func (c *Coordinator) fetchAll(ctx context.Context, program *tea.Program) {
 		return
 	}
 
+	c.logger.Emit(otel.Event{Kind: otel.KindFetchStart, Level: otel.LevelInfo, Comp: "coord"})
+	start := time.Now()
+
 	items, err := c.provider.Fetch(ctx)
 
 	newItems := 0
@@ -243,7 +251,7 @@ func (c *Coordinator) fetchAll(ctx context.Context, program *tea.Program) {
 		var saveErr error
 		newItems, saveErr = c.store.SaveItems(items)
 		if saveErr != nil {
-			log.Printf("coord: failed to save items: %v", saveErr)
+			c.logger.Emit(otel.Event{Kind: otel.KindError, Level: otel.LevelError, Comp: "coord", Msg: "failed to save items", Err: saveErr.Error()})
 		}
 	}
 
@@ -254,6 +262,8 @@ func (c *Coordinator) fetchAll(ctx context.Context, program *tea.Program) {
 			Err:      err,
 		})
 	}
+
+	c.logger.Emit(otel.Event{Kind: otel.KindFetchComplete, Level: otel.LevelInfo, Comp: "coord", Dur: time.Since(start), Count: newItems})
 
 	// After fetch, embed new items (if embedder available)
 	c.embedNewItems(ctx)

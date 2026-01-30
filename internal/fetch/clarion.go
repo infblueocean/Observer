@@ -5,12 +5,12 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"log"
 	"time"
 
 	"github.com/infblueocean/clarion"
 	_ "github.com/infblueocean/clarion/catalog"
 
+	"github.com/abelbrown/observer/internal/otel"
 	"github.com/abelbrown/observer/internal/store"
 )
 
@@ -18,15 +18,19 @@ import (
 type ClarionProvider struct {
 	sources []clarion.Source
 	opts    clarion.FetchOptions
+	logger  *otel.Logger
 }
 
 // NewClarionProvider creates a ClarionProvider.
 // If sources is nil, all registered Clarion sources are used.
-func NewClarionProvider(sources []clarion.Source, opts clarion.FetchOptions) *ClarionProvider {
+func NewClarionProvider(sources []clarion.Source, opts clarion.FetchOptions, l *otel.Logger) *ClarionProvider {
 	if sources == nil {
 		sources = clarion.AllSources()
 	}
-	return &ClarionProvider{sources: sources, opts: opts}
+	if l == nil {
+		l = otel.NewNullLogger()
+	}
+	return &ClarionProvider{sources: sources, opts: opts, logger: l}
 }
 
 // Fetch retrieves items from all configured Clarion sources.
@@ -37,7 +41,7 @@ func (p *ClarionProvider) Fetch(ctx context.Context) ([]store.Item, error) {
 	var errCount int
 	for _, r := range results {
 		if r.Err != nil {
-			log.Printf("fetch: %s: %v", r.Source.Name, r.Err)
+			p.logger.Emit(otel.Event{Kind: otel.KindFetchError, Level: otel.LevelWarn, Comp: "fetch", Source: r.Source.Name, Err: r.Err.Error()})
 			errCount++
 			continue
 		}

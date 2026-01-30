@@ -15,6 +15,7 @@ import (
 	"github.com/abelbrown/observer/internal/embed"
 	"github.com/abelbrown/observer/internal/fetch"
 	"github.com/abelbrown/observer/internal/filter"
+	"github.com/abelbrown/observer/internal/otel"
 	"github.com/abelbrown/observer/internal/rerank"
 	"github.com/abelbrown/observer/internal/store"
 	"github.com/abelbrown/observer/internal/ui"
@@ -49,6 +50,22 @@ func main() {
 	}
 	defer st.Close()
 
+	// Structured event log (JSONL) — separate from Bubble Tea's log output
+	eventLogPath := filepath.Join(dataDir, "observer.events.jsonl")
+	eventFile, err := os.OpenFile(eventLogPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
+	if err != nil {
+		log.Fatalf("Failed to open event log: %v", err)
+	}
+	defer eventFile.Close()
+
+	logger := otel.NewLogger(eventFile)
+	defer logger.Close()
+
+	ring := otel.NewRingBuffer(otel.DefaultRingSize)
+	logger.SetRingBuffer(ring)
+
+	logger.Emit(otel.Event{Kind: otel.KindStartup, Level: otel.LevelInfo, Comp: "main", Msg: "observer starting"})
+
 	// Jina API configuration
 	jinaKey := strings.TrimSpace(os.Getenv("JINA_API_KEY"))
 	embedModel := envOrDefault("JINA_EMBED_MODEL", "jina-embeddings-v3")
@@ -66,7 +83,7 @@ func main() {
 		MaxConcurrency: 10,
 		Timeout:        30 * time.Second,
 		MaxItems:       50,
-	})
+	}, logger)
 
 	// Create UI app with dependency injection
 	cfg := ui.AppConfig{
@@ -95,7 +112,7 @@ func main() {
 				}
 				embeddings, err := st.GetItemsWithEmbeddings(ids)
 				if err != nil {
-					log.Printf("Warning: failed to get embeddings: %v", err)
+					logger.Emit(otel.Event{Kind: otel.KindStoreError, Level: otel.LevelWarn, Comp: "main", Msg: "failed to get embeddings (recent)", Err: err.Error()})
 					embeddings = make(map[string][]float32)
 				}
 
@@ -129,7 +146,7 @@ func main() {
 				embeddings, err := st.GetItemsWithEmbeddings(ids)
 				if err != nil {
 					// Log but continue - semantic dedup will fall back to URL dedup
-					log.Printf("Warning: failed to get embeddings: %v", err)
+					logger.Emit(otel.Event{Kind: otel.KindStoreError, Level: otel.LevelWarn, Comp: "main", Msg: "failed to get embeddings (full)", Err: err.Error()})
 					embeddings = make(map[string][]float32)
 				}
 
@@ -150,11 +167,11 @@ func main() {
 			}
 		},
 		// LoadSearchPool: load all items for full-history search
-		LoadSearchPool: func() tea.Cmd {
+		LoadSearchPool: func(queryID string) tea.Cmd {
 			return func() tea.Msg {
 				items, err := st.GetItems(10000, true) // include read items
 				if err != nil {
-					return ui.SearchPoolLoaded{Err: err}
+					return ui.SearchPoolLoaded{Err: err, QueryID: queryID}
 				}
 				// No age filter, no LimitPerSource — search needs everything
 				ids := make([]string, len(items))
@@ -163,7 +180,7 @@ func main() {
 				}
 				embeddings, err := st.GetItemsWithEmbeddings(ids)
 				if err != nil {
-					log.Printf("Warning: failed to get embeddings for search pool: %v", err)
+					logger.Emit(otel.Event{Kind: otel.KindStoreError, Level: otel.LevelWarn, Comp: "main", Msg: "failed to get embeddings (search pool)", Err: err.Error()})
 					embeddings = make(map[string][]float32)
 				}
 				// Dedup only (no source limiting for search)
@@ -175,13 +192,15 @@ func main() {
 						filteredEmbeddings[item.ID] = emb
 					}
 				}
-				return ui.SearchPoolLoaded{Items: items, Embeddings: filteredEmbeddings}
+				return ui.SearchPoolLoaded{Items: items, Embeddings: filteredEmbeddings, QueryID: queryID}
 			}
 		},
 		// markRead
 		MarkRead: func(id string) tea.Cmd {
 			return func() tea.Msg {
-				st.MarkRead(id)
+				if err := st.MarkRead(id); err != nil {
+					logger.Error(otel.KindStoreError, "main", err)
+				}
 				return ui.ItemMarkedRead{ID: id}
 			}
 		},
@@ -192,18 +211,18 @@ func main() {
 			}
 		},
 		// embedQuery: embed a query string for semantic search
-		EmbedQuery: func(query string) tea.Cmd {
+		EmbedQuery: func(query string, queryID string) tea.Cmd {
 			return func() tea.Msg {
 				emb, err := embedder.EmbedQuery(ctx, query)
-				return ui.QueryEmbedded{Query: query, Embedding: emb, Err: err}
+				return ui.QueryEmbedded{Query: query, Embedding: emb, Err: err, QueryID: queryID}
 			}
 		},
 		// batchRerank: single Jina API call for all docs
-		BatchRerank: func(query string, docs []string) tea.Cmd {
+		BatchRerank: func(query string, docs []string, queryID string) tea.Cmd {
 			return func() tea.Msg {
 				scores, err := jinaReranker.Rerank(ctx, query, docs)
 				if err != nil {
-					return ui.RerankComplete{Query: query, Err: err}
+					return ui.RerankComplete{Query: query, Err: err, QueryID: queryID}
 				}
 				result := make([]float32, len(docs))
 				for _, s := range scores {
@@ -211,18 +230,28 @@ func main() {
 						result[s.Index] = s.Score
 					}
 				}
-				return ui.RerankComplete{Query: query, Scores: result}
+				return ui.RerankComplete{Query: query, Scores: result, QueryID: queryID}
 			}
+		},
+		Obs: ui.ObsConfig{
+			Logger: logger,
+			Ring:   ring,
 		},
 	}
 
 	app := ui.NewAppWithConfig(cfg)
 
+	// Redirect log output to file so it doesn't corrupt the TUI
+	logPath := filepath.Join(dataDir, "observer.log")
+	if f, err := tea.LogToFile(logPath, "observer"); err == nil {
+		defer f.Close()
+	}
+
 	// Create program
 	program := tea.NewProgram(app, tea.WithAltScreen())
 
 	// Create and start coordinator
-	coordinator := coord.NewCoordinator(st, provider, embedder)
+	coordinator := coord.NewCoordinator(st, provider, embedder, logger)
 	coordinator.Start(ctx, program)
 
 	// Start background embedding worker (continuously embeds items without embeddings)
@@ -230,8 +259,10 @@ func main() {
 
 	// Run UI (blocks until quit)
 	if _, err := program.Run(); err != nil {
-		log.Printf("Error running program: %v", err)
+		logger.Emit(otel.Event{Kind: otel.KindError, Level: otel.LevelError, Comp: "main", Msg: "program error", Err: err.Error()})
 	}
+
+	logger.Emit(otel.Event{Kind: otel.KindShutdown, Level: otel.LevelInfo, Comp: "main", Msg: "observer stopping"})
 
 	// Graceful shutdown
 	cancel()

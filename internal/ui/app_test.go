@@ -532,7 +532,7 @@ func TestAppSearchEnterSubmits(t *testing.T) {
 	var embedQuery string
 
 	app := NewAppWithConfig(AppConfig{
-		EmbedQuery: func(query string) tea.Cmd {
+		EmbedQuery: func(query string, queryID string) tea.Cmd {
 			embedCalled = true
 			embedQuery = query
 			return func() tea.Msg {
@@ -876,11 +876,19 @@ func TestAppEntryRerankedOutOfOrder(t *testing.T) {
 
 	model, _ = updated.Update(EntryReranked{Index: 1, Score: 0.1})
 	updated = model.(App)
-	if updated.rerankProgress != 3 {
-		t.Errorf("Progress should be 3, got %d", updated.rerankProgress)
-	}
 	if updated.rerankPending {
 		t.Error("Should not be pending after all entries scored")
+	}
+
+	// Rerank state should be cleared on completion
+	if updated.rerankEntries != nil {
+		t.Error("rerankEntries should be cleared after completion")
+	}
+	if updated.rerankScores != nil {
+		t.Error("rerankScores should be cleared after completion")
+	}
+	if updated.rerankProgress != 0 {
+		t.Errorf("rerankProgress should be 0 after completion, got %d", updated.rerankProgress)
 	}
 
 	// Item 1 (score 0.9) should be first
@@ -897,19 +905,10 @@ func TestAppEntryRerankedOutOfOrder(t *testing.T) {
 
 func TestAppBatchRerankPath(t *testing.T) {
 	var batchCalled bool
-	var batchQuery string
-	var batchDocs []string
 
 	app := NewAppWithConfig(AppConfig{
-		EmbedQuery: func(query string) tea.Cmd {
-			return func() tea.Msg {
-				return QueryEmbedded{Query: query, Embedding: []float32{1, 2, 3}}
-			}
-		},
-		BatchRerank: func(query string, docs []string) tea.Cmd {
+		BatchRerank: func(query string, docs []string, queryID string) tea.Cmd {
 			batchCalled = true
-			batchQuery = query
-			batchDocs = docs
 			return func() tea.Msg {
 				scores := make([]float32, len(docs))
 				for i := range scores {
@@ -924,56 +923,46 @@ func TestAppBatchRerankPath(t *testing.T) {
 		{ID: "2", Title: "Item 2"},
 		{ID: "3", Title: "Item 3"},
 	}
+	app.filterInput.SetValue("test")
+	app.queryEmbedding = []float32{1, 2, 3}
+	app.lastEmbeddedQuery = "test"
 
-	// Simulate query embedded → triggers startReranking
-	model, cmd := app.Update(QueryEmbedded{Query: "test", Embedding: []float32{1, 2, 3}})
+	// QueryEmbedded handler calls startReranking which fires batchRerank
+	model, _ := app.Update(QueryEmbedded{Query: "test", Embedding: []float32{1, 2, 3}})
 	updated := model.(App)
-
-	// Note: the QueryEmbedded handler calls startReranking which fires batchRerank.
-	// But we also need to set the filterInput value first.
-	// Let's set up properly:
-	app2 := NewAppWithConfig(AppConfig{
-		BatchRerank: func(query string, docs []string) tea.Cmd {
-			batchCalled = true
-			batchQuery = query
-			batchDocs = docs
-			return func() tea.Msg {
-				scores := make([]float32, len(docs))
-				for i := range scores {
-					scores[i] = float32(len(docs)-i) / float32(len(docs))
-				}
-				return RerankComplete{Query: query, Scores: scores}
-			}
-		},
-	})
-	app2.items = []store.Item{
-		{ID: "1", Title: "Item 1"},
-		{ID: "2", Title: "Item 2"},
-		{ID: "3", Title: "Item 3"},
-	}
-	app2.filterInput.SetValue("test")
-	app2.queryEmbedding = []float32{1, 2, 3}
-	app2.lastEmbeddedQuery = "test"
-
-	// Directly call startReranking (which is what QueryEmbedded handler does)
-	model, cmd = app2.Update(QueryEmbedded{Query: "test", Embedding: []float32{1, 2, 3}})
-	updated = model.(App)
-	_ = cmd
 
 	if !updated.rerankPending {
 		t.Error("Should be rerank pending after startReranking")
 	}
-
 	if !batchCalled {
 		t.Error("BatchRerank should have been called")
 	}
-	_ = batchQuery
-	_ = batchDocs
+
+	// Simulate the RerankComplete that the batch rerank would produce.
+	// Scores: Item 2 highest (0.9), Item 3 middle (0.5), Item 1 lowest (0.3).
+	model, _ = updated.Update(RerankComplete{
+		Query:  "test",
+		Scores: []float32{0.3, 0.9, 0.5},
+	})
+	updated = model.(App)
+
+	if updated.rerankPending {
+		t.Error("Should not be pending after RerankComplete")
+	}
+	if updated.items[0].ID != "2" {
+		t.Errorf("Item with highest score should be first, got ID '%s'", updated.items[0].ID)
+	}
+	if updated.statusText != "" {
+		t.Errorf("statusText should be cleared after RerankComplete, got %q", updated.statusText)
+	}
+	if updated.rerankEntries != nil {
+		t.Error("rerankEntries should be cleared after RerankComplete")
+	}
 }
 
 func TestAppRerankCompleteAppliesScores(t *testing.T) {
 	app := NewAppWithConfig(AppConfig{
-		BatchRerank: func(query string, docs []string) tea.Cmd {
+		BatchRerank: func(query string, docs []string, queryID string) tea.Cmd {
 			return nil
 		},
 	})
@@ -1016,7 +1005,7 @@ func TestAppRerankCompleteAppliesScores(t *testing.T) {
 
 func TestAppRerankCompleteStaleQuery(t *testing.T) {
 	app := NewAppWithConfig(AppConfig{
-		BatchRerank: func(query string, docs []string) tea.Cmd {
+		BatchRerank: func(query string, docs []string, queryID string) tea.Cmd {
 			return nil
 		},
 	})
@@ -1052,7 +1041,7 @@ func TestAppRerankCompleteStaleQuery(t *testing.T) {
 
 func TestAppBatchRerankView(t *testing.T) {
 	app := NewAppWithConfig(AppConfig{
-		BatchRerank: func(query string, docs []string) tea.Cmd {
+		BatchRerank: func(query string, docs []string, queryID string) tea.Cmd {
 			return nil
 		},
 	})
@@ -1100,7 +1089,7 @@ func TestAppStatusBarShowsSlash(t *testing.T) {
 
 func TestAppRerankCompleteError(t *testing.T) {
 	app := NewAppWithConfig(AppConfig{
-		BatchRerank: func(query string, docs []string) tea.Cmd { return nil },
+		BatchRerank: func(query string, docs []string, queryID string) tea.Cmd { return nil },
 	})
 	app.items = []store.Item{
 		{ID: "1", Title: "Item 1"},
@@ -1378,7 +1367,7 @@ func TestSearchSavesAndRestores(t *testing.T) {
 	}
 
 	app := NewAppWithConfig(AppConfig{
-		LoadSearchPool: func() tea.Cmd {
+		LoadSearchPool: func(queryID string) tea.Cmd {
 			return func() tea.Msg {
 				return SearchPoolLoaded{
 					Items:      []store.Item{{ID: "s1", Title: "Search Pool Item"}},
@@ -1386,7 +1375,7 @@ func TestSearchSavesAndRestores(t *testing.T) {
 				}
 			}
 		},
-		EmbedQuery: func(query string) tea.Cmd {
+		EmbedQuery: func(query string, queryID string) tea.Cmd {
 			return func() tea.Msg {
 				return QueryEmbedded{Query: query, Embedding: []float32{1, 2, 3}}
 			}
@@ -1464,7 +1453,7 @@ func TestSearchPoolLoaded(t *testing.T) {
 func TestSearchPoolAndQueryRace_QueryFirst(t *testing.T) {
 	// QueryEmbedded arrives before SearchPoolLoaded
 	app := NewAppWithConfig(AppConfig{
-		BatchRerank: func(query string, docs []string) tea.Cmd {
+		BatchRerank: func(query string, docs []string, queryID string) tea.Cmd {
 			return func() tea.Msg {
 				return RerankComplete{Query: query, Scores: make([]float32, len(docs))}
 			}
@@ -1512,7 +1501,7 @@ func TestSearchPoolAndQueryRace_QueryFirst(t *testing.T) {
 func TestSearchPoolAndQueryRace_PoolFirst(t *testing.T) {
 	// SearchPoolLoaded arrives before QueryEmbedded
 	app := NewAppWithConfig(AppConfig{
-		BatchRerank: func(query string, docs []string) tea.Cmd {
+		BatchRerank: func(query string, docs []string, queryID string) tea.Cmd {
 			return func() tea.Msg {
 				return RerankComplete{Query: query, Scores: make([]float32, len(docs))}
 			}
@@ -1676,7 +1665,7 @@ func TestTruncateRunesEdgeCases(t *testing.T) {
 
 func TestStatusTextSetOnSearch(t *testing.T) {
 	app := NewAppWithConfig(AppConfig{
-		EmbedQuery: func(query string) tea.Cmd {
+		EmbedQuery: func(query string, queryID string) tea.Cmd {
 			return func() tea.Msg {
 				return QueryEmbedded{Query: query, Embedding: []float32{1, 2, 3}}
 			}
@@ -1792,5 +1781,152 @@ func TestStatusTextClearedOnItemsLoadedCancelRerank(t *testing.T) {
 
 	if updated.statusText != "" {
 		t.Errorf("statusText should be cleared when ItemsLoaded cancels reranking, got %q", updated.statusText)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// P4: Query ID tests
+// ---------------------------------------------------------------------------
+
+func TestNewQueryIDUniqueness(t *testing.T) {
+	seen := make(map[string]struct{}, 1000)
+	for i := 0; i < 1000; i++ {
+		id := newQueryID()
+		if _, exists := seen[id]; exists {
+			t.Fatalf("duplicate queryID %q on iteration %d", id, i)
+		}
+		seen[id] = struct{}{}
+	}
+}
+
+func TestNewQueryIDFormat(t *testing.T) {
+	id := newQueryID()
+	if len(id) != 16 {
+		t.Fatalf("expected queryID length 16, got %d (%q)", len(id), id)
+	}
+	for i, c := range id {
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
+			t.Fatalf("unexpected character %q at position %d in queryID %q", string(c), i, id)
+		}
+	}
+}
+
+func TestStaleQueryIDCheck(t *testing.T) {
+	app := NewApp(nil, nil, nil)
+
+	// Simulate a search submission: set the query, queryID, and embeddingPending.
+	originalID := newQueryID()
+	app.queryID = originalID
+	app.embeddingPending = true
+	app.filterInput.SetValue("test")
+
+	// Now simulate the user starting a new search (queryID changes).
+	app.queryID = newQueryID()
+
+	// Deliver a QueryEmbedded with the OLD queryID — should be discarded.
+	model, _ := app.Update(QueryEmbedded{
+		Query:     "test",
+		Embedding: []float32{0.1, 0.2, 0.3},
+		QueryID:   originalID,
+	})
+	updated := model.(App)
+
+	if updated.queryEmbedding != nil {
+		t.Errorf("stale QueryEmbedded should have been discarded, but queryEmbedding is %v", updated.queryEmbedding)
+	}
+}
+
+func TestSameQueryDifferentID(t *testing.T) {
+	app := NewApp(nil, nil, nil)
+
+	// First search for "test" with id1.
+	app.queryID = "id1"
+	app.embeddingPending = true
+	app.filterInput.SetValue("test")
+
+	// Deliver QueryEmbedded with matching id1 — should be accepted.
+	model, _ := app.Update(QueryEmbedded{
+		Query:     "test",
+		Embedding: []float32{0.1, 0.2, 0.3},
+		QueryID:   "id1",
+	})
+	updated := model.(App)
+
+	if updated.queryEmbedding == nil {
+		t.Fatal("QueryEmbedded with matching queryID should have been accepted, but queryEmbedding is nil")
+	}
+
+	// Second search for "test" — same text, new ID.
+	updated.queryID = "id2"
+	updated.embeddingPending = true
+	updated.queryEmbedding = nil // reset for the new search
+
+	// Deliver QueryEmbedded with OLD id1 — should be discarded even though query text matches.
+	model2, _ := updated.Update(QueryEmbedded{
+		Query:     "test",
+		Embedding: []float32{0.4, 0.5, 0.6},
+		QueryID:   "id1",
+	})
+	updated2 := model2.(App)
+
+	if updated2.queryEmbedding != nil {
+		t.Errorf("QueryEmbedded with stale queryID should have been discarded even though query text matches, but queryEmbedding is %v", updated2.queryEmbedding)
+	}
+}
+
+// --- S10: QueryID stale tests for SearchPoolLoaded and RerankComplete ---
+
+func TestStaleQueryIDSearchPoolLoaded(t *testing.T) {
+	app := NewApp(nil, nil, nil)
+	app.items = []store.Item{{ID: "1", Title: "Current"}}
+	app.filterInput.SetValue("test")
+	app.searchActive = false
+	app.searchPoolPending = true
+	app.queryID = "current-id"
+
+	// Deliver SearchPoolLoaded with a stale QueryID
+	model, _ := app.Update(SearchPoolLoaded{
+		Items:      []store.Item{{ID: "stale", Title: "Stale Pool"}},
+		Embeddings: map[string][]float32{"stale": {0.1}},
+		QueryID:    "old-id",
+	})
+	updated := model.(App)
+
+	// Items should NOT be replaced
+	if updated.Items()[0].ID != "1" {
+		t.Errorf("stale SearchPoolLoaded should be ignored, got items[0].ID = %q", updated.Items()[0].ID)
+	}
+}
+
+func TestStaleQueryIDRerankComplete(t *testing.T) {
+	app := NewApp(nil, nil, nil)
+	app.items = []store.Item{
+		{ID: "1", Title: "Item 1"},
+		{ID: "2", Title: "Item 2"},
+	}
+	app.rerankPending = true
+	app.rerankEntries = []store.Item{
+		{ID: "1", Title: "Item 1"},
+		{ID: "2", Title: "Item 2"},
+	}
+	app.rerankScores = make([]float32, 2)
+	app.filterInput.SetValue("test")
+	app.queryID = "current-id"
+	app.statusText = `Reranking "test"...`
+
+	// Deliver RerankComplete with a stale QueryID
+	model, _ := app.Update(RerankComplete{
+		Query:   "test",
+		Scores:  []float32{0.9, 0.1},
+		QueryID: "old-id",
+	})
+	updated := model.(App)
+
+	// Should still be pending (stale result ignored)
+	if !updated.rerankPending {
+		t.Error("stale RerankComplete should be ignored, rerankPending should still be true")
+	}
+	if updated.statusText != `Reranking "test"...` {
+		t.Errorf("statusText should be unchanged, got %q", updated.statusText)
 	}
 }
