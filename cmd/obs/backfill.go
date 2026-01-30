@@ -3,16 +3,13 @@ package main
 import (
 	"bufio"
 	"context"
+	"flag"
 	"fmt"
 	"log"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"regexp"
 	"strings"
-
-	"github.com/abelbrown/observer/internal/embed"
-	"github.com/abelbrown/observer/internal/store"
 )
 
 var htmlTagRe = regexp.MustCompile(`<[^>]*>`)
@@ -28,55 +25,45 @@ func sanitizeForEmbedding(s string, maxChars int) string {
 	return s
 }
 
-func main() {
-	// Handle graceful shutdown
+func runBackfill() {
+	fs := flag.NewFlagSet("backfill", flag.ExitOnError)
+	clear := fs.Bool("clear", false, "Clear all existing embeddings before backfilling")
+	batchSize := fs.Int("batch-size", 50, "Items per batch")
+	dryRun := fs.Bool("dry-run", false, "Show counts without embedding")
+	fs.Parse(os.Args[1:])
+
+	apiKey := requireJinaKey()
+
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer cancel()
 
-	// Check for API key
-	apiKey := strings.TrimSpace(os.Getenv("JINA_API_KEY"))
-	if apiKey == "" {
-		log.Fatal("JINA_API_KEY environment variable is required")
-	}
-
-	model := os.Getenv("JINA_EMBED_MODEL")
-	if model == "" {
-		model = "jina-embeddings-v3"
-	}
-
-	// Open database
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		log.Fatalf("Failed to get home directory: %v", err)
-	}
-	dbPath := filepath.Join(homeDir, ".observer", "observer.db")
-
-	st, err := store.Open(dbPath)
-	if err != nil {
-		log.Fatalf("Failed to open database: %v", err)
-	}
+	st := openDB()
 	defer st.Close()
 
 	// Count existing embeddings and total items
 	totalItems, err := st.CountAllItems()
 	if err != nil {
-		log.Fatalf("Failed to count items: %v", err)
+		log.Fatalf("failed to count items: %v", err)
 	}
 	needingEmbedding, err := st.CountItemsNeedingEmbedding()
 	if err != nil {
-		log.Fatalf("Failed to count items needing embedding: %v", err)
+		log.Fatalf("failed to count items needing embedding: %v", err)
 	}
 	existingEmbeddings := totalItems - needingEmbedding
 
-	fmt.Printf("Database: %s\n", dbPath)
+	fmt.Printf("Database: %s\n", dbPath())
 	fmt.Printf("Total items: %d\n", totalItems)
 	fmt.Printf("Existing embeddings: %d\n", existingEmbeddings)
 	fmt.Printf("Needing embedding: %d\n", needingEmbedding)
 	fmt.Println()
 
-	// If --clear flag, prompt to clear existing embeddings
-	// (needed when switching embedding models)
-	if len(os.Args) > 1 && os.Args[1] == "--clear" && existingEmbeddings > 0 {
+	if *dryRun {
+		fmt.Println("(dry run — no changes made)")
+		return
+	}
+
+	// Clear existing embeddings if requested
+	if *clear && existingEmbeddings > 0 {
 		fmt.Printf("Clear %d existing embeddings and re-embed? [y/N] ", existingEmbeddings)
 		reader := bufio.NewReader(os.Stdin)
 		answer, _ := reader.ReadString('\n')
@@ -88,19 +75,17 @@ func main() {
 
 		cleared, err := st.ClearAllEmbeddings()
 		if err != nil {
-			log.Fatalf("Failed to clear embeddings: %v", err)
+			log.Fatalf("failed to clear embeddings: %v", err)
 		}
 		fmt.Printf("Cleared %d embeddings.\n\n", cleared)
 	}
 
 	// Create Jina embedder
-	embedder := embed.NewJinaEmbedder(apiKey, model)
-	fmt.Printf("Using model: %s\n", model)
+	embedder := newJinaEmbedder(apiKey)
+	fmt.Printf("Using model: %s\n", envOrDefault("JINA_EMBED_MODEL", "jina-embeddings-v3"))
 	fmt.Println("Starting backfill... (Ctrl+C to stop, re-run to resume)")
 	fmt.Println()
 
-	// Process in batches of 50 (Jina has payload limits)
-	batchSize := 50
 	embedded := 0
 
 	for {
@@ -109,9 +94,9 @@ func main() {
 			return
 		}
 
-		items, err := st.GetItemsNeedingEmbedding(batchSize)
+		items, err := st.GetItemsNeedingEmbedding(*batchSize)
 		if err != nil {
-			log.Fatalf("Failed to get items: %v", err)
+			log.Fatalf("failed to get items: %v", err)
 		}
 		if len(items) == 0 {
 			break

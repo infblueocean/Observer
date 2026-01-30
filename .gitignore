@@ -1,5 +1,6 @@
-# Binary (the compiled executable, not the directory)
+# Binaries (the compiled executables, not the directories)
 /observer
+/obs
 
 # IDE
 .idea/

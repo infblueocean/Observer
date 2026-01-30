@@ -21,6 +21,7 @@ Observer is an ambient news aggregation TUI (Terminal User Interface) built with
 ```bash
 # Build
 go build -o observer ./cmd/observer
+go build -o obs ./cmd/obs
 
 # Test
 go test ./...
@@ -31,8 +32,20 @@ go test -race ./...
 # Run single test
 go test -run TestName ./path/to/package
 
-# Run
+# Run TUI
 ./observer
+
+# Debug & maintenance CLI
+./obs                           # help
+./obs stats                     # pipeline counts
+./obs stats --db                # + DB health
+./obs search "query"            # two-stage search debug (requires JINA_API_KEY)
+./obs search --cosine-only "q"  # cosine stage only
+./obs rerank                    # reranker validation (Ollama)
+./obs backfill                  # batch embed missing items (requires JINA_API_KEY)
+./obs backfill --dry-run        # check counts without embedding
+./obs events --tail 20          # last 20 events
+./obs events -f --level warn    # follow warns+errors
 ```
 
 ## Architecture
@@ -41,7 +54,7 @@ go test -run TestName ./path/to/package
 
 ```
 cmd/observer/       Main entry point — wires dependencies, starts TUI
-cmd/backfill/       Standalone CLI to backfill Jina embeddings in the database
+cmd/obs/            Unified debug & maintenance CLI (backfill, stats, search, rerank, events)
 internal/coord/     Coordinator — background fetch + embedding pipeline
 internal/embed/     Embedder interface + Jina API and Ollama implementations
 internal/fetch/     RSS/source fetching
@@ -89,16 +102,20 @@ The `handleKeyMsg` cascade (`searchActive` -> `embeddingPending` -> `rerankPendi
 | `JINA_EMBED_MODEL` | `jina-embeddings-v3` | Jina embedding model name. |
 | `JINA_RERANK_MODEL` | `jina-reranker-v3` | Jina reranking model name. |
 
-### Backfill Tool
+### `obs` CLI Tool
 
-When switching from Ollama to Jina embeddings, existing embeddings are incompatible. Run the backfill tool to re-embed:
+The `obs` binary consolidates all debug and maintenance utilities:
 
-```bash
-source ~/src/claude/keys.sh  # or export JINA_API_KEY=...
-go run ./cmd/backfill
-```
+| Subcommand | Description |
+|------------|-------------|
+| `obs stats` | Pipeline stage counts, source distribution |
+| `obs stats --db` | + DB health: embedding coverage, timestamps |
+| `obs search <query>` | Two-stage search debug (cosine + cross-encoder) |
+| `obs rerank` | Ollama reranker validation with test headlines |
+| `obs backfill` | Batch embed items missing embeddings |
+| `obs events` | JSONL event log viewer with filtering and follow mode |
 
-The tool is idempotent — it only processes items with NULL embeddings. First run prompts to clear old embeddings; subsequent runs resume from where they left off.
+Backfill is idempotent — it only processes items with NULL embeddings. Use `--clear` to wipe and re-embed, `--dry-run` to check counts.
 
 ## Workflow Requirements
 
