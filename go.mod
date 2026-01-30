@@ -8,11 +8,12 @@ require (
 	github.com/charmbracelet/bubbles v0.21.0
 	github.com/charmbracelet/bubbletea v1.3.10
 	github.com/charmbracelet/lipgloss v1.1.0
-	github.com/mmcdole/gofeed v1.3.0
-	golang.org/x/sync v0.19.0
+	github.com/infblueocean/clarion v0.0.0-00010101000000-000000000000
 	golang.org/x/time v0.14.0
 	modernc.org/sqlite v1.44.3
 )
+
+replace github.com/infblueocean/clarion => /home/abelbrown/src/clarion
 
 require (
 	github.com/PuerkitoBio/goquery v1.8.0 // indirect
@@ -32,6 +33,7 @@ require (
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/mattn/go-localereader v0.0.1 // indirect
 	github.com/mattn/go-runewidth v0.0.16 // indirect
+	github.com/mmcdole/gofeed v1.3.0 // indirect
 	github.com/mmcdole/goxpp v1.1.1-0.20240225020742-a0c311522b23 // indirect
 	github.com/modern-go/concurrent v0.0.0-20180306012644-bacd9c7ef1dd // indirect
 	github.com/modern-go/reflect2 v1.0.2 // indirect
@@ -44,6 +46,7 @@ require (
 	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect
 	golang.org/x/exp v0.0.0-20251023183803-a4bb9ffd2546 // indirect
 	golang.org/x/net v0.4.0 // indirect
+	golang.org/x/sync v0.19.0 // indirect
 	golang.org/x/sys v0.37.0 // indirect
 	golang.org/x/text v0.5.0 // indirect
 	modernc.org/libc v1.67.6 // indirect

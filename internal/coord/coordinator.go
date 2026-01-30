@@ -10,10 +10,8 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"golang.org/x/sync/errgroup"
 
 	"github.com/abelbrown/observer/internal/embed"
-	"github.com/abelbrown/observer/internal/fetch"
 	"github.com/abelbrown/observer/internal/store"
 	"github.com/abelbrown/observer/internal/ui"
 )
@@ -21,54 +19,33 @@ import (
 // fetchInterval is the time between fetch cycles.
 const fetchInterval = 5 * time.Minute
 
-// fetchTimeout is the timeout for each individual fetch.
-const fetchTimeout = 30 * time.Second
-
-// maxConcurrentFetches limits parallel fetch operations.
-const maxConcurrentFetches = 5
-
-// embedBatchSize is the max items to embed per fetch cycle.
+// embedBatchSize is the max items to embed per cycle.
 const embedBatchSize = 100
 
 // embedWorkerInterval is the time between embedding worker cycles.
 const embedWorkerInterval = 2 * time.Second
 
-// embedWorkerBatchSize is the number of items to embed per worker cycle.
-const embedWorkerBatchSize = 10
-
-// fetcher interface for dependency injection (testing).
-type fetcher interface {
-	Fetch(ctx context.Context, src fetch.Source) ([]store.Item, error)
+// Provider fetches items from external sources.
+type Provider interface {
+	Fetch(ctx context.Context) ([]store.Item, error)
 }
 
 // Coordinator manages background fetching and embedding.
 // Uses context cancellation as the ONLY stop mechanism.
 type Coordinator struct {
 	store    *store.Store
-	fetcher  fetcher               // interface for testing
-	embedder embed.Embedder        // optional: nil to disable embedding
-	sources  []fetch.Source        // IMMUTABLE: set at construction, never modified
+	provider Provider
+	embedder embed.Embedder // optional: nil to disable embedding
 	wg       sync.WaitGroup
 }
 
-// NewCoordinator creates a Coordinator with the real fetcher.
+// NewCoordinator creates a Coordinator with the given provider.
 // The embedder is optional (nil to disable embedding).
-func NewCoordinator(s *store.Store, f *fetch.Fetcher, e embed.Embedder, sources []fetch.Source) *Coordinator {
-	return NewCoordinatorWithFetcher(s, f, e, sources)
-}
-
-// NewCoordinatorWithFetcher allows injecting a custom fetcher (for testing).
-// The embedder is optional (nil to disable embedding).
-func NewCoordinatorWithFetcher(s *store.Store, f fetcher, e embed.Embedder, sources []fetch.Source) *Coordinator {
-	// Copy sources slice to ensure immutability
-	sourcesCopy := make([]fetch.Source, len(sources))
-	copy(sourcesCopy, sources)
-
+func NewCoordinator(s *store.Store, p Provider, e embed.Embedder) *Coordinator {
 	return &Coordinator{
 		store:    s,
-		fetcher:  f,
+		provider: p,
 		embedder: e,
-		sources:  sourcesCopy,
 	}
 }
 
@@ -105,7 +82,7 @@ func (c *Coordinator) Wait() {
 
 // StartEmbeddingWorker starts a background worker that continuously embeds
 // items without embeddings. Processes items in small batches with delays
-// to avoid overwhelming Ollama. Use this for backfilling existing items.
+// to avoid overwhelming the API. Use this for backfilling existing items.
 func (c *Coordinator) StartEmbeddingWorker(ctx context.Context) {
 	if c.embedder == nil {
 		return
@@ -123,7 +100,7 @@ func (c *Coordinator) StartEmbeddingWorker(ctx context.Context) {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				c.embedBatch(ctx, embedWorkerBatchSize)
+				c.embedBatch(ctx, embedBatchSize)
 			}
 		}
 	}()
@@ -155,8 +132,12 @@ func sanitizeForEmbedding(s string, maxChars int) string {
 	s = htmlTagRe.ReplaceAllString(s, " ")
 	s = whitespaceRe.ReplaceAllString(s, " ")
 	s = strings.TrimSpace(s)
-	if len(s) > maxChars {
-		s = s[:maxChars]
+	if maxChars <= 0 {
+		return ""
+	}
+	runes := []rune(s)
+	if len(runes) > maxChars {
+		return string(runes[:maxChars])
 	}
 	return s
 }
@@ -166,9 +147,12 @@ func sanitizeForEmbedding(s string, maxChars int) string {
 func embedTextForItem(item store.Item) string {
 	text := item.Title
 	if item.Summary != "" {
-		clean := sanitizeForEmbedding(item.Summary, 2000-len(text))
-		if clean != "" {
-			text += " " + clean
+		remaining := 2000 - len([]rune(text))
+		if remaining > 0 {
+			clean := sanitizeForEmbedding(item.Summary, remaining)
+			if clean != "" {
+				text += " " + clean
+			}
 		}
 	}
 	return text
@@ -227,54 +211,33 @@ func (c *Coordinator) embedItems(ctx context.Context, items []store.Item) {
 	}
 }
 
-// fetchAll fetches all sources in parallel, then embeds new items.
-// Each fetch has a 30-second timeout.
-// Sends ui.FetchComplete messages to the program (order non-deterministic).
+// fetchAll fetches from the provider, saves items, sends completion, then embeds.
 func (c *Coordinator) fetchAll(ctx context.Context, program *tea.Program) {
-	var g errgroup.Group
-	g.SetLimit(maxConcurrentFetches)
-
-	for _, src := range c.sources {
-		g.Go(func() error {
-			// Early exit if context cancelled
-			if ctx.Err() != nil {
-				return nil
-			}
-			c.fetchSource(ctx, src, program)
-			return nil // never fail the group - errors reported per-source
-		})
+	if ctx.Err() != nil {
+		return
 	}
 
-	_ = g.Wait() // All goroutines return nil, but explicit discard for clarity
+	items, err := c.provider.Fetch(ctx)
 
-	// After all fetches, embed new items (if embedder available)
-	c.embedNewItems(ctx)
-}
-
-// fetchSource fetches a single source with timeout.
-// Sends ui.FetchComplete message when done.
-func (c *Coordinator) fetchSource(ctx context.Context, src fetch.Source, program *tea.Program) {
-	fetchCtx, cancel := context.WithTimeout(ctx, fetchTimeout)
-	defer cancel()
-
-	items, err := c.fetcher.Fetch(fetchCtx, src)
-
-	// Save items if fetch succeeded
 	newItems := 0
 	if err == nil && len(items) > 0 {
 		var saveErr error
 		newItems, saveErr = c.store.SaveItems(items)
-		_ = saveErr // intentionally ignored - fetch succeeded, save errors are rare
+		if saveErr != nil {
+			log.Printf("coord: failed to save items: %v", saveErr)
+		}
 	}
 
-	// Send completion message (handle nil program gracefully for testing)
 	if program != nil {
 		program.Send(ui.FetchComplete{
-			Source:   src.Name,
+			Source:   "all",
 			NewItems: newItems,
 			Err:      err,
 		})
 	}
+
+	// After fetch, embed new items (if embedder available)
+	c.embedNewItems(ctx)
 }
 
 // embedNewItems generates embeddings for items that don't have one.

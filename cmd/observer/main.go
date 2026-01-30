@@ -9,6 +9,8 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/infblueocean/clarion"
+
 	"github.com/abelbrown/observer/internal/coord"
 	"github.com/abelbrown/observer/internal/embed"
 	"github.com/abelbrown/observer/internal/fetch"
@@ -47,9 +49,6 @@ func main() {
 	}
 	defer st.Close()
 
-	// Create fetcher
-	fetcher := fetch.NewFetcher(30 * time.Second)
-
 	// Jina API configuration
 	jinaKey := strings.TrimSpace(os.Getenv("JINA_API_KEY"))
 	embedModel := envOrDefault("JINA_EMBED_MODEL", "jina-embeddings-v3")
@@ -62,11 +61,12 @@ func main() {
 	embedder := embed.NewJinaEmbedder(jinaKey, embedModel)
 	jinaReranker := rerank.NewJinaReranker(jinaKey, rerankModel)
 
-	// Default sources (can be made configurable later)
-	sources := []fetch.Source{
-		{Type: "rss", Name: "Hacker News", URL: "https://news.ycombinator.com/rss"},
-		{Type: "rss", Name: "Lobsters", URL: "https://lobste.rs/rss"},
-	}
+	// Create provider using Clarion
+	provider := fetch.NewClarionProvider(nil, clarion.FetchOptions{
+		MaxConcurrency: 10,
+		Timeout:        30 * time.Second,
+		MaxItems:       50,
+	})
 
 	// Create UI app with dependency injection
 	cfg := ui.AppConfig{
@@ -151,7 +151,7 @@ func main() {
 	program := tea.NewProgram(app, tea.WithAltScreen())
 
 	// Create and start coordinator
-	coordinator := coord.NewCoordinator(st, fetcher, embedder, sources)
+	coordinator := coord.NewCoordinator(st, provider, embedder)
 	coordinator.Start(ctx, program)
 
 	// Start background embedding worker (continuously embeds items without embeddings)
