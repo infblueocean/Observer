@@ -708,6 +708,7 @@ func TestAppEntryRerankedProgress(t *testing.T) {
 	app.rerankProgress = 0
 	app.filterInput.SetValue("test")
 	app.rerankQuery = "test"
+	app.statusText = `Reranking "test"...`
 
 	// Process first entry (parallel — no chaining, so no cmd returned)
 	model, cmd := app.Update(EntryReranked{Index: 0, Score: 0.9})
@@ -747,6 +748,7 @@ func TestAppEntryRerankedComplete(t *testing.T) {
 	app.rerankProgress = 1
 	app.filterInput.SetValue("test")
 	app.rerankQuery = "test"
+	app.statusText = `Reranking "test"...`
 
 	// Process second (final) entry
 	model, _ := app.Update(EntryReranked{Index: 1, Score: 0.8})
@@ -760,6 +762,10 @@ func TestAppEntryRerankedComplete(t *testing.T) {
 	if updated.items[0].ID != "2" {
 		t.Errorf("Item with higher score should be first, got ID '%s'", updated.items[0].ID)
 	}
+
+	if updated.statusText != "" {
+		t.Errorf("statusText should be cleared after all entries scored, got %q", updated.statusText)
+	}
 }
 
 func TestAppRerankProgressView(t *testing.T) {
@@ -772,6 +778,7 @@ func TestAppRerankProgressView(t *testing.T) {
 	}
 	app.filterInput.SetValue("query")
 	app.rerankPending = true
+	app.statusText = "Reranking \"query\"..."
 	app.rerankEntries = []store.Item{
 		{ID: "1", Title: "First Entry"},
 		{ID: "2", Title: "Second Entry"},
@@ -779,38 +786,22 @@ func TestAppRerankProgressView(t *testing.T) {
 	}
 	app.rerankScores = []float32{0.9, 0.2, 0}
 	app.rerankProgress = 2
-	app.rerankStart = time.Now()
 
 	view := app.View()
 
-	// Should show item stream above progress panel
+	// Should show item stream
 	if !strings.Contains(view, "Test Item") {
-		t.Errorf("View should show items above progress panel, got: %s", view)
+		t.Errorf("View should show items, got: %s", view)
 	}
 
-	// Should show reranking progress in bottom panel
+	// Should show reranking status in status bar
 	if !strings.Contains(view, "Reranking") {
-		t.Errorf("Progress view should contain 'Reranking', got: %s", view)
+		t.Errorf("Status bar should contain 'Reranking', got: %s", view)
 	}
 
-	// Should show completed entries in panel
-	if !strings.Contains(view, "First Entry") {
-		t.Errorf("Progress view should show completed entry 'First Entry', got: %s", view)
-	}
-
-	// Should show checkmarks
-	if !strings.Contains(view, "✓") {
-		t.Errorf("Progress view should contain checkmarks, got: %s", view)
-	}
-
-	// Should show count
-	if !strings.Contains(view, "2/3") {
-		t.Errorf("Progress view should show count '2/3', got: %s", view)
-	}
-
-	// Should show separator
-	if !strings.Contains(view, "───") {
-		t.Errorf("Progress view should contain separator, got: %s", view)
+	// statusText-based view shows spinner + status text, not detailed panel
+	if strings.Contains(view, "✓") {
+		t.Errorf("Status bar view should not show checkmarks, got: %s", view)
 	}
 }
 
@@ -825,6 +816,7 @@ func TestAppNavigationDuringRerank(t *testing.T) {
 	app.rerankEntries = app.items
 	app.rerankScores = make([]float32, 3)
 	app.rerankProgress = 1
+	app.statusText = `Reranking "test"...`
 
 	// Should allow j/k navigation during reranking
 	model, _ := app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
@@ -864,6 +856,7 @@ func TestAppEntryRerankedOutOfOrder(t *testing.T) {
 	app.rerankProgress = 0
 	app.filterInput.SetValue("test")
 	app.rerankQuery = "test"
+	app.statusText = `Reranking "test"...`
 
 	// Scores arrive out of order (parallel execution)
 	model, _ := app.Update(EntryReranked{Index: 2, Score: 0.5})
@@ -893,6 +886,10 @@ func TestAppEntryRerankedOutOfOrder(t *testing.T) {
 	// Item 1 (score 0.9) should be first
 	if updated.items[0].ID != "1" {
 		t.Errorf("Item with highest score should be first, got ID '%s'", updated.items[0].ID)
+	}
+
+	if updated.statusText != "" {
+		t.Errorf("statusText should be cleared after all entries scored, got %q", updated.statusText)
 	}
 }
 
@@ -994,6 +991,7 @@ func TestAppRerankCompleteAppliesScores(t *testing.T) {
 	app.rerankScores = make([]float32, 3)
 	app.rerankProgress = 0
 	app.filterInput.SetValue("test")
+	app.statusText = `Reranking "test"...`
 
 	// Send RerankComplete
 	model, _ := app.Update(RerankComplete{
@@ -1009,6 +1007,10 @@ func TestAppRerankCompleteAppliesScores(t *testing.T) {
 	// Item 2 (score 0.9) should be first
 	if updated.items[0].ID != "2" {
 		t.Errorf("Item with highest score should be first, got ID '%s'", updated.items[0].ID)
+	}
+
+	if updated.statusText != "" {
+		t.Errorf("statusText should be cleared after RerankComplete, got %q", updated.statusText)
 	}
 }
 
@@ -1029,6 +1031,7 @@ func TestAppRerankCompleteStaleQuery(t *testing.T) {
 	}
 	app.rerankScores = make([]float32, 2)
 	app.filterInput.SetValue("current query")
+	app.statusText = `Reranking "current query"...`
 
 	// Send RerankComplete for a stale query
 	model, _ := app.Update(RerankComplete{
@@ -1040,6 +1043,10 @@ func TestAppRerankCompleteStaleQuery(t *testing.T) {
 	// Should still be pending (stale result ignored)
 	if !updated.rerankPending {
 		t.Error("Should still be pending after stale RerankComplete")
+	}
+
+	if updated.statusText != `Reranking "current query"...` {
+		t.Errorf("statusText should be unchanged after stale RerankComplete, got %q", updated.statusText)
 	}
 }
 
@@ -1057,17 +1064,18 @@ func TestAppBatchRerankView(t *testing.T) {
 	}
 	app.filterInput.SetValue("query")
 	app.rerankPending = true
+	app.statusText = "Reranking \"query\"..."
 	app.rerankEntries = []store.Item{{ID: "1", Title: "Test"}}
 	app.rerankScores = make([]float32, 1)
 
 	view := app.View()
 
-	// Batch mode should show spinner, not progress panel
+	// Should show spinner with status text
 	if !strings.Contains(view, "Reranking") {
 		t.Errorf("View should show 'Reranking' during batch rerank, got: %s", view)
 	}
 
-	// Should NOT show the progress panel checkmarks (that's per-entry mode)
+	// Should NOT show checkmarks
 	if strings.Contains(view, "✓") {
 		t.Errorf("Batch rerank view should not show checkmarks, got: %s", view)
 	}
@@ -1105,6 +1113,7 @@ func TestAppRerankCompleteError(t *testing.T) {
 	}
 	app.rerankScores = make([]float32, 2)
 	app.filterInput.SetValue("test")
+	app.statusText = `Reranking "test"...`
 
 	testErr := fmt.Errorf("rerank failed")
 	model, _ := app.Update(RerankComplete{
@@ -1122,6 +1131,10 @@ func TestAppRerankCompleteError(t *testing.T) {
 	if updated.rerankEntries != nil {
 		t.Error("rerankEntries should be cleared on error")
 	}
+
+	if updated.statusText != "" {
+		t.Errorf("statusText should be cleared on error, got %q", updated.statusText)
+	}
 }
 
 func TestAppCtrlCDuringRerankQuits(t *testing.T) {
@@ -1130,6 +1143,7 @@ func TestAppCtrlCDuringRerankQuits(t *testing.T) {
 	app.rerankPending = true
 	app.rerankEntries = []store.Item{{ID: "1", Title: "Item 1"}}
 	app.rerankScores = make([]float32, 1)
+	app.statusText = `Reranking "test"...`
 
 	_, cmd := app.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
 	if cmd == nil {
@@ -1144,6 +1158,7 @@ func TestAppCtrlCDuringRerankQuits(t *testing.T) {
 func TestAppCtrlCDuringEmbeddingQuits(t *testing.T) {
 	app := NewApp(nil, nil, nil)
 	app.embeddingPending = true
+	app.statusText = `Searching for "test"...`
 
 	_, cmd := app.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
 	if cmd == nil {
@@ -1161,6 +1176,7 @@ func TestAppItemsLoadedCancelsReranking(t *testing.T) {
 	app.rerankEntries = []store.Item{{ID: "1", Title: "Old Item"}}
 	app.rerankScores = make([]float32, 1)
 	app.rerankProgress = 0
+	app.statusText = `Reranking "test"...`
 
 	model, _ := app.Update(ItemsLoaded{Items: []store.Item{
 		{ID: "2", Title: "New Item"},
@@ -1172,6 +1188,10 @@ func TestAppItemsLoadedCancelsReranking(t *testing.T) {
 	}
 	if updated.rerankEntries != nil {
 		t.Error("rerankEntries should be cleared")
+	}
+
+	if updated.statusText != "" {
+		t.Errorf("statusText should be cleared when reranking cancelled, got %q", updated.statusText)
 	}
 }
 
@@ -1649,5 +1669,128 @@ func TestTruncateRunesEdgeCases(t *testing.T) {
 	// No truncation needed
 	if got := truncateRunes("hi", 5); got != "hi" {
 		t.Errorf("truncateRunes(\"hi\", 5) = %q, want \"hi\"", got)
+	}
+}
+
+// --- statusText lifecycle tests ---
+
+func TestStatusTextSetOnSearch(t *testing.T) {
+	app := NewAppWithConfig(AppConfig{
+		EmbedQuery: func(query string) tea.Cmd {
+			return func() tea.Msg {
+				return QueryEmbedded{Query: query, Embedding: []float32{1, 2, 3}}
+			}
+		},
+	})
+	app.items = []store.Item{{ID: "1", Title: "Item 1"}}
+
+	// Enter search, type, submit
+	model, _ := app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+	updated := model.(App)
+	for _, ch := range "climate" {
+		model, _ = updated.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{ch}})
+		updated = model.(App)
+	}
+	model, _ = updated.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated = model.(App)
+
+	if updated.statusText == "" {
+		t.Error("statusText should be set after submitSearch")
+	}
+	if !strings.Contains(updated.statusText, "climate") {
+		t.Errorf("statusText should contain the query, got %q", updated.statusText)
+	}
+}
+
+func TestStatusTextClearedOnRerankComplete(t *testing.T) {
+	app := NewApp(nil, nil, nil)
+	app.items = []store.Item{{ID: "1", Title: "Item 1"}}
+	app.rerankPending = true
+	app.statusText = `Reranking "test"...`
+	app.rerankEntries = []store.Item{{ID: "1", Title: "Item 1"}}
+	app.rerankScores = make([]float32, 1)
+	app.filterInput.SetValue("test")
+
+	model, _ := app.Update(RerankComplete{
+		Query:  "test",
+		Scores: []float32{0.5},
+	})
+	updated := model.(App)
+
+	if updated.statusText != "" {
+		t.Errorf("statusText should be cleared after RerankComplete, got %q", updated.statusText)
+	}
+}
+
+func TestStatusTextClearedOnQueryEmbeddedError(t *testing.T) {
+	app := NewApp(nil, nil, nil)
+	app.embeddingPending = true
+	app.statusText = `Searching for "test"...`
+
+	model, _ := app.Update(QueryEmbedded{
+		Query: "test",
+		Err:   fmt.Errorf("embed failed"),
+	})
+	updated := model.(App)
+
+	if updated.statusText != "" {
+		t.Errorf("statusText should be cleared on QueryEmbedded error, got %q", updated.statusText)
+	}
+}
+
+func TestStatusTextClearedOnEsc(t *testing.T) {
+	app := NewApp(nil, nil, nil)
+	app.items = []store.Item{{ID: "1", Title: "Item 1"}}
+	app.filterInput.SetValue("test")
+	app.embeddingPending = true
+	app.statusText = `Searching for "test"...`
+
+	model, _ := app.Update(tea.KeyMsg{Type: tea.KeyEscape})
+	updated := model.(App)
+
+	if updated.statusText != "" {
+		t.Errorf("statusText should be cleared on Esc, got %q", updated.statusText)
+	}
+}
+
+func TestViewRendersStatusText(t *testing.T) {
+	app := NewApp(nil, nil, nil)
+	app.ready = true
+	app.width = 80
+	app.height = 24
+	app.items = []store.Item{
+		{ID: "1", Title: "Test Item", SourceName: "source", Published: time.Now()},
+	}
+	app.statusText = `Searching for "climate"...`
+
+	view := app.View()
+
+	if !strings.Contains(view, "Searching") {
+		t.Errorf("View should render statusText, got: %s", view)
+	}
+	if !strings.Contains(view, "climate") {
+		t.Errorf("View should contain query in statusText, got: %s", view)
+	}
+	// Should NOT show normal status bar hints
+	if strings.Contains(view, "j/k") {
+		t.Errorf("View should not show normal key hints when statusText is set, got: %s", view)
+	}
+}
+
+func TestStatusTextClearedOnItemsLoadedCancelRerank(t *testing.T) {
+	app := NewApp(nil, nil, nil)
+	app.rerankPending = true
+	app.statusText = `Reranking "test"...`
+	app.rerankEntries = []store.Item{{ID: "1", Title: "Old Item"}}
+	app.rerankScores = make([]float32, 1)
+	app.rerankProgress = 0
+
+	model, _ := app.Update(ItemsLoaded{Items: []store.Item{
+		{ID: "2", Title: "New Item"},
+	}})
+	updated := model.(App)
+
+	if updated.statusText != "" {
+		t.Errorf("statusText should be cleared when ItemsLoaded cancels reranking, got %q", updated.statusText)
 	}
 }

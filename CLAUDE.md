@@ -64,7 +64,22 @@ Key interfaces:
 - `embed.BatchEmbedder` — extends Embedder with `EmbedBatch(ctx, texts)`
 - `rerank.Reranker` — `Available()`, `Rerank(ctx, query, docs)`
 
-The coordinator detects `BatchEmbedder` at runtime and uses batch calls when available. The UI detects batch reranking via the `BatchRerank` callback and shows a spinner instead of per-entry progress.
+The coordinator detects `BatchEmbedder` at runtime and uses batch calls when available.
+
+### UI Status Bar Pattern (`statusText`)
+
+The UI uses a single `statusText string` field to decouple View() from pipeline internals. When non-empty, the status bar renders `spinner + statusText`; when empty, it renders the normal position/key hints.
+
+**Setting statusText:** Handlers set it when starting async work:
+- `submitSearch()` sets `Searching for "X"...`
+- `startReranking()` sets `Reranking "X"...`
+
+**Clearing statusText:** Every completion, error, and cancellation path clears it:
+- `RerankComplete` / `handleEntryReranked` (all done) / `QueryEmbedded` error / `SearchPoolLoaded` error / `ItemsLoaded` (cancel rerank) / `clearSearch()` (Esc)
+
+Handlers set `statusText` directly and include `spinner.Tick` in their command batch when starting async work. Clears are direct `a.statusText = ""` assignments.
+
+The `handleKeyMsg` cascade (`searchActive` -> `embeddingPending` -> `rerankPending` -> normal) remains unchanged and uses the pipeline booleans directly for input routing. Only View() uses `statusText`.
 
 ### Environment Variables
 
