@@ -140,7 +140,8 @@ func RenderStatusBar(cursor, total int, width int, loading bool) string {
 		StatusBarKey.Render("Enter") + StatusBarText.Render(":read"),
 		StatusBarKey.Render("/") + StatusBarText.Render(":search"),
 		StatusBarKey.Render("r") + StatusBarText.Render(":refresh"),
-		StatusBarKey.Render("D") + StatusBarText.Render(":debug"),
+		StatusBarKey.Render("f") + StatusBarText.Render(":fetch"),
+		StatusBarKey.Render("?") + StatusBarText.Render(":debug"),
 		StatusBarKey.Render("q") + StatusBarText.Render(":quit"),
 	}
 	keyHints := strings.Join(keys, " ")

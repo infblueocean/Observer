@@ -167,8 +167,11 @@ func main() {
 			}
 		},
 		// LoadSearchPool: load all items for full-history search
-		LoadSearchPool: func(queryID string) tea.Cmd {
+		LoadSearchPool: func(ctx context.Context, queryID string) tea.Cmd {
 			return func() tea.Msg {
+				if err := ctx.Err(); err != nil {
+					return ui.SearchPoolLoaded{Err: err, QueryID: queryID}
+				}
 				items, err := st.GetItems(10000, true) // include read items
 				if err != nil {
 					return ui.SearchPoolLoaded{Err: err, QueryID: queryID}
@@ -211,14 +214,14 @@ func main() {
 			}
 		},
 		// embedQuery: embed a query string for semantic search
-		EmbedQuery: func(query string, queryID string) tea.Cmd {
+		EmbedQuery: func(ctx context.Context, query string, queryID string) tea.Cmd {
 			return func() tea.Msg {
 				emb, err := embedder.EmbedQuery(ctx, query)
 				return ui.QueryEmbedded{Query: query, Embedding: emb, Err: err, QueryID: queryID}
 			}
 		},
 		// batchRerank: single Jina API call for all docs
-		BatchRerank: func(query string, docs []string, queryID string) tea.Cmd {
+		BatchRerank: func(ctx context.Context, query string, docs []string, queryID string) tea.Cmd {
 			return func() tea.Msg {
 				scores, err := jinaReranker.Rerank(ctx, query, docs)
 				if err != nil {
@@ -237,6 +240,7 @@ func main() {
 			Logger: logger,
 			Ring:   ring,
 		},
+		AutoReranks: true,
 	}
 
 	app := ui.NewAppWithConfig(cfg)

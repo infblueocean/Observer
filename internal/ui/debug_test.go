@@ -97,11 +97,11 @@ func TestDebugToggle(t *testing.T) {
 		t.Error("debug should be hidden initially")
 	}
 
-	// Press Shift+D to show
-	model, _ := app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'D'}})
+	// Press ? to show
+	model, _ := app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'?'}})
 	updated := model.(App)
 	if !updated.debugVisible {
-		t.Error("Shift+D should show debug overlay")
+		t.Error("? should show debug overlay")
 	}
 
 	// Verify debug view renders
@@ -110,11 +110,11 @@ func TestDebugToggle(t *testing.T) {
 		t.Errorf("debug view should contain '[DEBUG]', got:\n%s", view)
 	}
 
-	// Press Shift+D again to hide
-	model, _ = updated.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'D'}})
+	// Press ? again to hide
+	model, _ = updated.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'?'}})
 	updated = model.(App)
 	if updated.debugVisible {
-		t.Error("second Shift+D should hide debug overlay")
+		t.Error("second ? should hide debug overlay")
 	}
 }
 

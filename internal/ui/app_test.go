@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"context"
 	"fmt"
 	"math"
 	"strings"
@@ -477,7 +478,7 @@ func TestAppSlashEntersSearchMode(t *testing.T) {
 	model, _ := app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
 	updated := model.(App)
 
-	if !updated.searchActive {
+	if updated.mode != ModeSearch {
 		t.Error("/ should activate search mode")
 	}
 }
@@ -503,7 +504,7 @@ func TestAppSearchInputAcceptsText(t *testing.T) {
 	}
 
 	// Should still be in search mode
-	if !updated.searchActive {
+	if updated.mode != ModeSearch {
 		t.Error("Should still be in search mode while typing")
 	}
 }
@@ -522,7 +523,7 @@ func TestAppSearchEscCancels(t *testing.T) {
 	model, _ = updated.Update(tea.KeyMsg{Type: tea.KeyEscape})
 	updated = model.(App)
 
-	if updated.searchActive {
+	if updated.mode == ModeSearch {
 		t.Error("Esc should exit search mode")
 	}
 }
@@ -532,7 +533,7 @@ func TestAppSearchEnterSubmits(t *testing.T) {
 	var embedQuery string
 
 	app := NewAppWithConfig(AppConfig{
-		EmbedQuery: func(query string, queryID string) tea.Cmd {
+		EmbedQuery: func(ctx context.Context, query string, queryID string) tea.Cmd {
 			embedCalled = true
 			embedQuery = query
 			return func() tea.Msg {
@@ -558,7 +559,7 @@ func TestAppSearchEnterSubmits(t *testing.T) {
 	model, cmd := updated.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	updated = model.(App)
 
-	if updated.searchActive {
+	if updated.mode == ModeSearch {
 		t.Error("Enter should exit search input mode")
 	}
 
@@ -590,7 +591,7 @@ func TestAppSearchEmptyEnterCancels(t *testing.T) {
 	model, _ = updated.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	updated = model.(App)
 
-	if updated.searchActive {
+	if updated.mode == ModeSearch {
 		t.Error("Enter with empty query should exit search mode")
 	}
 
@@ -674,18 +675,19 @@ func TestAppEscClearsResults(t *testing.T) {
 		{ID: "1", Title: "Apple News", Published: time.Now()},
 		{ID: "2", Title: "Banana Report", Published: time.Now().Add(-time.Hour)},
 	}
-	app.filterInput.SetValue("test query")
+	app.activeQuery = "test query"
+	app.mode = ModeResults
 
 	// Press Esc to clear
 	model, _ := app.Update(tea.KeyMsg{Type: tea.KeyEscape})
 	updated := model.(App)
 
-	if updated.filterInput.Value() != "" {
-		t.Errorf("Esc should clear filter, got '%s'", updated.filterInput.Value())
+	if updated.activeQuery != "" {
+		t.Errorf("Esc should clear active query, got '%s'", updated.activeQuery)
 	}
 
-	if updated.searchActive {
-		t.Error("Esc should not leave search mode active")
+	if updated.mode == ModeResults {
+		t.Error("Esc should exit results mode")
 	}
 }
 
@@ -706,12 +708,12 @@ func TestAppEntryRerankedProgress(t *testing.T) {
 	}
 	app.rerankScores = make([]float32, 3)
 	app.rerankProgress = 0
-	app.filterInput.SetValue("test")
+	app.activeQuery = "test"
 	app.rerankQuery = "test"
 	app.statusText = `Reranking "test"...`
 
 	// Process first entry (parallel — no chaining, so no cmd returned)
-	model, cmd := app.Update(EntryReranked{Index: 0, Score: 0.9})
+	model, cmd := app.Update(EntryReranked{ItemID: "1", Score: 0.9})
 	updated := model.(App)
 
 	if updated.rerankProgress != 1 {
@@ -746,12 +748,12 @@ func TestAppEntryRerankedComplete(t *testing.T) {
 	}
 	app.rerankScores = []float32{0.3, 0} // First already scored
 	app.rerankProgress = 1
-	app.filterInput.SetValue("test")
+	app.activeQuery = "test"
 	app.rerankQuery = "test"
 	app.statusText = `Reranking "test"...`
 
 	// Process second (final) entry
-	model, _ := app.Update(EntryReranked{Index: 1, Score: 0.8})
+	model, _ := app.Update(EntryReranked{ItemID: "2", Score: 0.8})
 	updated := model.(App)
 
 	if updated.rerankPending {
@@ -776,7 +778,7 @@ func TestAppRerankProgressView(t *testing.T) {
 	app.items = []store.Item{
 		{ID: "1", Title: "Test Item", SourceName: "source", Published: time.Now()},
 	}
-	app.filterInput.SetValue("query")
+	app.activeQuery = "query"
 	app.rerankPending = true
 	app.statusText = "Reranking \"query\"..."
 	app.rerankEntries = []store.Item{
@@ -854,12 +856,12 @@ func TestAppEntryRerankedOutOfOrder(t *testing.T) {
 	}
 	app.rerankScores = make([]float32, 3)
 	app.rerankProgress = 0
-	app.filterInput.SetValue("test")
+	app.activeQuery = "test"
 	app.rerankQuery = "test"
 	app.statusText = `Reranking "test"...`
 
 	// Scores arrive out of order (parallel execution)
-	model, _ := app.Update(EntryReranked{Index: 2, Score: 0.5})
+	model, _ := app.Update(EntryReranked{ItemID: "3", Score: 0.5})
 	updated := model.(App)
 	if updated.rerankProgress != 1 {
 		t.Errorf("Progress should be 1, got %d", updated.rerankProgress)
@@ -868,13 +870,13 @@ func TestAppEntryRerankedOutOfOrder(t *testing.T) {
 		t.Errorf("Score for index 2 should be 0.5, got %f", updated.rerankScores[2])
 	}
 
-	model, _ = updated.Update(EntryReranked{Index: 0, Score: 0.9})
+	model, _ = updated.Update(EntryReranked{ItemID: "1", Score: 0.9})
 	updated = model.(App)
 	if updated.rerankProgress != 2 {
 		t.Errorf("Progress should be 2, got %d", updated.rerankProgress)
 	}
 
-	model, _ = updated.Update(EntryReranked{Index: 1, Score: 0.1})
+	model, _ = updated.Update(EntryReranked{ItemID: "2", Score: 0.1})
 	updated = model.(App)
 	if updated.rerankPending {
 		t.Error("Should not be pending after all entries scored")
@@ -907,7 +909,7 @@ func TestAppBatchRerankPath(t *testing.T) {
 	var batchCalled bool
 
 	app := NewAppWithConfig(AppConfig{
-		BatchRerank: func(query string, docs []string, queryID string) tea.Cmd {
+		BatchRerank: func(ctx context.Context, query string, docs []string, queryID string) tea.Cmd {
 			batchCalled = true
 			return func() tea.Msg {
 				scores := make([]float32, len(docs))
@@ -917,15 +919,18 @@ func TestAppBatchRerankPath(t *testing.T) {
 				return RerankComplete{Query: query, Scores: scores}
 			}
 		},
+		AutoReranks: true,
 	})
 	app.items = []store.Item{
 		{ID: "1", Title: "Item 1"},
 		{ID: "2", Title: "Item 2"},
 		{ID: "3", Title: "Item 3"},
 	}
-	app.filterInput.SetValue("test")
+	app.activeQuery = "test"
+	app.mode = ModeResults
 	app.queryEmbedding = []float32{1, 2, 3}
 	app.lastEmbeddedQuery = "test"
+	app.embeddingPending = true
 
 	// QueryEmbedded handler calls startReranking which fires batchRerank
 	model, _ := app.Update(QueryEmbedded{Query: "test", Embedding: []float32{1, 2, 3}})
@@ -962,7 +967,7 @@ func TestAppBatchRerankPath(t *testing.T) {
 
 func TestAppRerankCompleteAppliesScores(t *testing.T) {
 	app := NewAppWithConfig(AppConfig{
-		BatchRerank: func(query string, docs []string, queryID string) tea.Cmd {
+		BatchRerank: func(ctx context.Context, query string, docs []string, queryID string) tea.Cmd {
 			return nil
 		},
 	})
@@ -979,7 +984,7 @@ func TestAppRerankCompleteAppliesScores(t *testing.T) {
 	}
 	app.rerankScores = make([]float32, 3)
 	app.rerankProgress = 0
-	app.filterInput.SetValue("test")
+	app.activeQuery = "test"
 	app.statusText = `Reranking "test"...`
 
 	// Send RerankComplete
@@ -1005,7 +1010,7 @@ func TestAppRerankCompleteAppliesScores(t *testing.T) {
 
 func TestAppRerankCompleteStaleQuery(t *testing.T) {
 	app := NewAppWithConfig(AppConfig{
-		BatchRerank: func(query string, docs []string, queryID string) tea.Cmd {
+		BatchRerank: func(ctx context.Context, query string, docs []string, queryID string) tea.Cmd {
 			return nil
 		},
 	})
@@ -1019,7 +1024,7 @@ func TestAppRerankCompleteStaleQuery(t *testing.T) {
 		{ID: "2", Title: "Item 2"},
 	}
 	app.rerankScores = make([]float32, 2)
-	app.filterInput.SetValue("current query")
+	app.activeQuery = "current query"
 	app.statusText = `Reranking "current query"...`
 
 	// Send RerankComplete for a stale query
@@ -1041,7 +1046,7 @@ func TestAppRerankCompleteStaleQuery(t *testing.T) {
 
 func TestAppBatchRerankView(t *testing.T) {
 	app := NewAppWithConfig(AppConfig{
-		BatchRerank: func(query string, docs []string, queryID string) tea.Cmd {
+		BatchRerank: func(ctx context.Context, query string, docs []string, queryID string) tea.Cmd {
 			return nil
 		},
 	})
@@ -1051,7 +1056,7 @@ func TestAppBatchRerankView(t *testing.T) {
 	app.items = []store.Item{
 		{ID: "1", Title: "Test Item", SourceName: "source", Published: time.Now()},
 	}
-	app.filterInput.SetValue("query")
+	app.activeQuery = "query"
 	app.rerankPending = true
 	app.statusText = "Reranking \"query\"..."
 	app.rerankEntries = []store.Item{{ID: "1", Title: "Test"}}
@@ -1089,7 +1094,7 @@ func TestAppStatusBarShowsSlash(t *testing.T) {
 
 func TestAppRerankCompleteError(t *testing.T) {
 	app := NewAppWithConfig(AppConfig{
-		BatchRerank: func(query string, docs []string, queryID string) tea.Cmd { return nil },
+		BatchRerank: func(ctx context.Context, query string, docs []string, queryID string) tea.Cmd { return nil },
 	})
 	app.items = []store.Item{
 		{ID: "1", Title: "Item 1"},
@@ -1101,7 +1106,7 @@ func TestAppRerankCompleteError(t *testing.T) {
 		{ID: "2", Title: "Item 2"},
 	}
 	app.rerankScores = make([]float32, 2)
-	app.filterInput.SetValue("test")
+	app.activeQuery = "test"
 	app.statusText = `Reranking "test"...`
 
 	testErr := fmt.Errorf("rerank failed")
@@ -1367,7 +1372,7 @@ func TestSearchSavesAndRestores(t *testing.T) {
 	}
 
 	app := NewAppWithConfig(AppConfig{
-		LoadSearchPool: func(queryID string) tea.Cmd {
+		LoadSearchPool: func(ctx context.Context, queryID string) tea.Cmd {
 			return func() tea.Msg {
 				return SearchPoolLoaded{
 					Items:      []store.Item{{ID: "s1", Title: "Search Pool Item"}},
@@ -1375,7 +1380,7 @@ func TestSearchSavesAndRestores(t *testing.T) {
 				}
 			}
 		},
-		EmbedQuery: func(query string, queryID string) tea.Cmd {
+		EmbedQuery: func(ctx context.Context, query string, queryID string) tea.Cmd {
 			return func() tea.Msg {
 				return QueryEmbedded{Query: query, Embedding: []float32{1, 2, 3}}
 			}
@@ -1405,7 +1410,9 @@ func TestSearchSavesAndRestores(t *testing.T) {
 		t.Fatal("submitSearch should save embeddings")
 	}
 
-	// Now press Esc to restore
+	// First Esc cancels in-flight work, second Esc exits results
+	model, _ = updated.Update(tea.KeyMsg{Type: tea.KeyEscape})
+	updated = model.(App)
 	model, _ = updated.Update(tea.KeyMsg{Type: tea.KeyEscape})
 	updated = model.(App)
 
@@ -1435,9 +1442,10 @@ func TestSearchPoolLoaded(t *testing.T) {
 
 	app := NewApp(nil, nil, nil)
 	app.items = []store.Item{{ID: "old", Title: "Old"}}
-	app.filterInput.SetValue("test query")
-	// Simulate: search submitted, not in search input mode
-	app.searchActive = false
+	app.activeQuery = "test query"
+	// Simulate: search submitted, results mode
+	app.mode = ModeResults
+	app.searchPoolPending = true
 
 	model, _ := app.Update(SearchPoolLoaded{Items: poolItems, Embeddings: poolEmb})
 	updated := model.(App)
@@ -1453,17 +1461,20 @@ func TestSearchPoolLoaded(t *testing.T) {
 func TestSearchPoolAndQueryRace_QueryFirst(t *testing.T) {
 	// QueryEmbedded arrives before SearchPoolLoaded
 	app := NewAppWithConfig(AppConfig{
-		BatchRerank: func(query string, docs []string, queryID string) tea.Cmd {
+		BatchRerank: func(ctx context.Context, query string, docs []string, queryID string) tea.Cmd {
 			return func() tea.Msg {
 				return RerankComplete{Query: query, Scores: make([]float32, len(docs))}
 			}
 		},
+		AutoReranks: true,
 	})
 	app.items = []store.Item{
 		{ID: "1", Title: "Item 1"},
 	}
-	app.filterInput.SetValue("test")
+	app.activeQuery = "test"
+	app.mode = ModeResults
 	app.searchPoolPending = true // search pool still loading
+	app.embeddingPending = true
 
 	// QueryEmbedded arrives first
 	model, _ := app.Update(QueryEmbedded{Query: "test", Embedding: []float32{1, 2, 3}})
@@ -1501,14 +1512,16 @@ func TestSearchPoolAndQueryRace_QueryFirst(t *testing.T) {
 func TestSearchPoolAndQueryRace_PoolFirst(t *testing.T) {
 	// SearchPoolLoaded arrives before QueryEmbedded
 	app := NewAppWithConfig(AppConfig{
-		BatchRerank: func(query string, docs []string, queryID string) tea.Cmd {
+		BatchRerank: func(ctx context.Context, query string, docs []string, queryID string) tea.Cmd {
 			return func() tea.Msg {
 				return RerankComplete{Query: query, Scores: make([]float32, len(docs))}
 			}
 		},
+		AutoReranks: true,
 	})
 	app.items = []store.Item{{ID: "1", Title: "Item 1"}}
-	app.filterInput.SetValue("test")
+	app.activeQuery = "test"
+	app.mode = ModeResults
 	app.searchPoolPending = true
 	app.embeddingPending = true
 
@@ -1543,8 +1556,8 @@ func TestStaleSearchPoolIgnored(t *testing.T) {
 		{ID: "1", Title: "Chrono Item", Published: time.Now()},
 	}
 	// No active query (user pressed Esc)
-	app.filterInput.SetValue("")
-	app.searchActive = false
+	app.activeQuery = ""
+	app.mode = ModeList
 
 	// Stale SearchPoolLoaded arrives after Esc
 	model, _ := app.Update(SearchPoolLoaded{
@@ -1602,8 +1615,8 @@ func TestStage2DuringSearch(t *testing.T) {
 
 func TestSearchPoolLoadedError(t *testing.T) {
 	app := NewApp(nil, nil, nil)
-	app.filterInput.SetValue("test")
-	app.searchActive = false
+	app.activeQuery = "test"
+	app.mode = ModeResults
 	app.searchPoolPending = true
 
 	testErr := fmt.Errorf("search pool failed")
@@ -1665,7 +1678,7 @@ func TestTruncateRunesEdgeCases(t *testing.T) {
 
 func TestStatusTextSetOnSearch(t *testing.T) {
 	app := NewAppWithConfig(AppConfig{
-		EmbedQuery: func(query string, queryID string) tea.Cmd {
+		EmbedQuery: func(ctx context.Context, query string, queryID string) tea.Cmd {
 			return func() tea.Msg {
 				return QueryEmbedded{Query: query, Embedding: []float32{1, 2, 3}}
 			}
@@ -1698,7 +1711,7 @@ func TestStatusTextClearedOnRerankComplete(t *testing.T) {
 	app.statusText = `Reranking "test"...`
 	app.rerankEntries = []store.Item{{ID: "1", Title: "Item 1"}}
 	app.rerankScores = make([]float32, 1)
-	app.filterInput.SetValue("test")
+	app.activeQuery = "test"
 
 	model, _ := app.Update(RerankComplete{
 		Query:  "test",
@@ -1730,15 +1743,22 @@ func TestStatusTextClearedOnQueryEmbeddedError(t *testing.T) {
 func TestStatusTextClearedOnEsc(t *testing.T) {
 	app := NewApp(nil, nil, nil)
 	app.items = []store.Item{{ID: "1", Title: "Item 1"}}
-	app.filterInput.SetValue("test")
+	app.activeQuery = "test"
+	app.mode = ModeResults
 	app.embeddingPending = true
 	app.statusText = `Searching for "test"...`
 
 	model, _ := app.Update(tea.KeyMsg{Type: tea.KeyEscape})
 	updated := model.(App)
 
+	if updated.statusText != "Cancelled -- Esc again to exit" {
+		t.Errorf("statusText should indicate cancel on first Esc, got %q", updated.statusText)
+	}
+
+	model, _ = updated.Update(tea.KeyMsg{Type: tea.KeyEscape})
+	updated = model.(App)
 	if updated.statusText != "" {
-		t.Errorf("statusText should be cleared on Esc, got %q", updated.statusText)
+		t.Errorf("statusText should be cleared on second Esc, got %q", updated.statusText)
 	}
 }
 
@@ -1818,7 +1838,7 @@ func TestStaleQueryIDCheck(t *testing.T) {
 	originalID := newQueryID()
 	app.queryID = originalID
 	app.embeddingPending = true
-	app.filterInput.SetValue("test")
+	app.activeQuery = "test"
 
 	// Now simulate the user starting a new search (queryID changes).
 	app.queryID = newQueryID()
@@ -1842,7 +1862,7 @@ func TestSameQueryDifferentID(t *testing.T) {
 	// First search for "test" with id1.
 	app.queryID = "id1"
 	app.embeddingPending = true
-	app.filterInput.SetValue("test")
+	app.activeQuery = "test"
 
 	// Deliver QueryEmbedded with matching id1 — should be accepted.
 	model, _ := app.Update(QueryEmbedded{
@@ -1879,8 +1899,8 @@ func TestSameQueryDifferentID(t *testing.T) {
 func TestStaleQueryIDSearchPoolLoaded(t *testing.T) {
 	app := NewApp(nil, nil, nil)
 	app.items = []store.Item{{ID: "1", Title: "Current"}}
-	app.filterInput.SetValue("test")
-	app.searchActive = false
+	app.activeQuery = "test"
+	app.mode = ModeResults
 	app.searchPoolPending = true
 	app.queryID = "current-id"
 
@@ -1910,7 +1930,7 @@ func TestStaleQueryIDRerankComplete(t *testing.T) {
 		{ID: "2", Title: "Item 2"},
 	}
 	app.rerankScores = make([]float32, 2)
-	app.filterInput.SetValue("test")
+	app.activeQuery = "test"
 	app.queryID = "current-id"
 	app.statusText = `Reranking "test"...`
 

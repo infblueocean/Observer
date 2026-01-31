@@ -36,7 +36,7 @@ type QueryEmbedded struct {
 // EntryReranked is sent when a single entry has been scored by the cross-encoder.
 // Used for package-manager style progress feedback.
 type EntryReranked struct {
-	Index   int     // Index into the reranking batch
+	ItemID  string  // Item ID for lookup in rerankEntries
 	Score   float32 // Relevance score in [0, 1]
 	QueryID string  // search correlation ID
 	Err     error
