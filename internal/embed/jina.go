@@ -56,6 +56,15 @@ func NewJinaEmbedder(apiKey, model string) *JinaEmbedder {
 	}
 }
 
+// SetRateLimit configures the rate limiter. Pass 0 to disable rate limiting.
+func (e *JinaEmbedder) SetRateLimit(interval time.Duration) {
+	if interval <= 0 {
+		e.limiter = rate.NewLimiter(rate.Inf, 1)
+	} else {
+		e.limiter = rate.NewLimiter(rate.Every(interval), 1)
+	}
+}
+
 // Available returns true if the Jina API key is configured.
 func (e *JinaEmbedder) Available() bool {
 	return e.apiKey != ""

@@ -32,8 +32,8 @@ func NewJinaReranker(apiKey, model string) *JinaReranker {
 		apiKey:   apiKey,
 		model:    model,
 		endpoint: "https://api.jina.ai/v1/rerank",
-		client:   &http.Client{Timeout: 30 * time.Second},
-		limiter:  rate.NewLimiter(rate.Every(750*time.Millisecond), 1),
+		client:  &http.Client{Timeout: 30 * time.Second},
+		limiter: rate.NewLimiter(rate.Inf, 1), // no throttle — reranker is only used for interactive search
 	}
 }
 
@@ -41,6 +41,10 @@ func NewJinaReranker(apiKey, model string) *JinaReranker {
 func (r *JinaReranker) Available() bool {
 	return r.apiKey != ""
 }
+
+// AutoReranks returns true because Jina's batch API is fast enough to
+// auto-rerank after every search without user confirmation.
+func (r *JinaReranker) AutoReranks() bool { return true }
 
 // Name returns the reranker identifier for logging.
 func (r *JinaReranker) Name() string {

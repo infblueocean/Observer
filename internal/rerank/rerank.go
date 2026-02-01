@@ -23,6 +23,13 @@ type Reranker interface {
 	Name() string
 }
 
+// AutoReranker is an optional extension of Reranker. Backends that support
+// fast batch reranking (e.g., Jina) return true. Slow per-item backends
+// (e.g., Ollama) return false. Used by main.go to set AppConfig.AutoReranks.
+type AutoReranker interface {
+	AutoReranks() bool
+}
+
 // Score represents a document's relevance score.
 type Score struct {
 	Index int     // Original index in the documents slice

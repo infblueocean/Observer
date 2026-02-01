@@ -53,6 +53,11 @@ func (r *OllamaReranker) Name() string {
 	return fmt.Sprintf("ollama/%s", r.model)
 }
 
+// AutoReranks returns false because Ollama's per-item scoring is slower
+// than Jina's batch API. With thinking suppression it's ~2-3s for 30 items
+// (down from ~32s), but still manual opt-in via R key.
+func (r *OllamaReranker) AutoReranks() bool { return false }
+
 // Available returns true if Ollama is running and has a suitable model.
 func (r *OllamaReranker) Available() bool {
 	if r.model == "" {
@@ -182,11 +187,17 @@ func (r *OllamaReranker) ScoreOne(ctx context.Context, query, doc string) (float
 		doc = doc[:500] + "..."
 	}
 
-	// Qwen3-Reranker ChatML format with raw mode
+	// Qwen3-Reranker ChatML format with raw mode.
 	// Uses topic-relevance instruct (not "passages that answer the query")
 	// because we're matching news headlines to user interests, not doing QA.
+	//
+	// The assistant turn pre-fills an empty <think></think> block to suppress
+	// Qwen3's chain-of-thought reasoning. Without this, each item generates
+	// 200-300 thinking tokens before answering "yes"/"no", making 30 items
+	// take ~32s. With suppression, num_predict drops from 300 to 10 and
+	// per-item latency falls to ~50-100ms.
 	prompt := fmt.Sprintf(
-		"<|im_start|>system\nJudge whether the Document meets the requirements based on the Query and the Instruct provided. Note that the answer can only be \"yes\" or \"no\".<|im_end|>\n<|im_start|>user\n<Instruct>: Given a topic of interest, determine if the news headline is relevant to the topic\n<Query>: %s\n<Document>: %s<|im_end|>\n<|im_start|>assistant\n",
+		"<|im_start|>system\nJudge whether the Document meets the requirements based on the Query and the Instruct provided. Note that the answer can only be \"yes\" or \"no\".<|im_end|>\n<|im_start|>user\n<Instruct>: Given a topic of interest, determine if the news headline is relevant to the topic\n<Query>: %s\n<Document>: %s<|im_end|>\n<|im_start|>assistant\n<think>\n</think>\n",
 		query, doc)
 
 	body := map[string]any{
@@ -195,8 +206,8 @@ func (r *OllamaReranker) ScoreOne(ctx context.Context, query, doc string) (float
 		"raw":    true,
 		"stream": false,
 		"options": map[string]any{
-			"temperature": 0.0,   // Deterministic
-			"num_predict": 300,   // Qwen3 uses <think> blocks before answering
+			"temperature": 0.0, // Deterministic
+			"num_predict": 10,  // Just "yes"/"no" — thinking suppressed by pre-filled <think></think>
 		},
 	}
 

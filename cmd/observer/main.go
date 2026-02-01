@@ -28,6 +28,33 @@ func envOrDefault(key, fallback string) string {
 	return fallback
 }
 
+type e2eEmbedder struct{}
+
+func (e e2eEmbedder) Available() bool { return true }
+
+func (e e2eEmbedder) Embed(ctx context.Context, text string) ([]float32, error) {
+	return e.embedText(text), nil
+}
+
+func (e e2eEmbedder) EmbedQuery(ctx context.Context, text string) ([]float32, error) {
+	return e.embedText(text), nil
+}
+
+func (e e2eEmbedder) embedText(text string) []float32 {
+	var sum int
+	for i := 0; i < len(text); i++ {
+		sum += int(text[i])
+	}
+	base := float32(sum%97) / 97.0
+	return []float32{base + 0.1, base + 0.2, base + 0.3}
+}
+
+type noopProvider struct{}
+
+func (n noopProvider) Fetch(ctx context.Context) ([]store.Item, error) {
+	return nil, nil
+}
+
 func main() {
 	// Setup context for graceful shutdown
 	ctx, cancel := context.WithCancel(context.Background())
@@ -66,17 +93,34 @@ func main() {
 
 	logger.Emit(otel.Event{Kind: otel.KindStartup, Level: otel.LevelInfo, Comp: "main", Msg: "observer starting"})
 
-	// Jina API configuration
+	// Backend selection: Jina when JINA_API_KEY is set, otherwise no AI backend.
+	// Ollama can be enabled explicitly via OLLAMA_HOST.
+	e2eMode := os.Getenv("OBSERVER_E2E") != ""
 	jinaKey := strings.TrimSpace(os.Getenv("JINA_API_KEY"))
 	embedModel := envOrDefault("JINA_EMBED_MODEL", "jina-embeddings-v3")
 	rerankModel := envOrDefault("JINA_RERANK_MODEL", "jina-reranker-v3")
 
-	// Embedder and reranker: Jina API required
-	if jinaKey == "" {
-		log.Fatal("JINA_API_KEY environment variable is required")
+	var embedder embed.Embedder
+	var reranker rerank.Reranker
+
+	switch {
+	case e2eMode:
+		embedder = e2eEmbedder{}
+		logger.Emit(otel.Event{Kind: otel.KindStartup, Level: otel.LevelInfo, Comp: "main", Msg: "using e2e mock embedder"})
+	case jinaKey != "":
+		embedder = embed.NewJinaEmbedder(jinaKey, embedModel)
+		reranker = rerank.NewJinaReranker(jinaKey, rerankModel)
+		logger.Emit(otel.Event{Kind: otel.KindStartup, Level: otel.LevelInfo, Comp: "main", Msg: "using Jina API backend"})
+	case os.Getenv("OLLAMA_HOST") != "":
+		ollamaEndpoint := os.Getenv("OLLAMA_HOST")
+		ollamaEmbedModel := envOrDefault("OLLAMA_EMBED_MODEL", "mxbai-embed-large")
+		ollamaRerankModel := os.Getenv("OLLAMA_RERANK_MODEL")
+		embedder = embed.NewOllamaEmbedder(ollamaEndpoint, ollamaEmbedModel)
+		reranker = rerank.NewOllamaReranker(ollamaEndpoint, ollamaRerankModel)
+		logger.Emit(otel.Event{Kind: otel.KindStartup, Level: otel.LevelInfo, Comp: "main", Msg: "using Ollama backend"})
+	default:
+		logger.Emit(otel.Event{Kind: otel.KindStartup, Level: otel.LevelWarn, Comp: "main", Msg: "no AI backend (set JINA_API_KEY or OLLAMA_HOST)"})
 	}
-	embedder := embed.NewJinaEmbedder(jinaKey, embedModel)
-	jinaReranker := rerank.NewJinaReranker(jinaKey, rerankModel)
 
 	// Create provider using Clarion
 	provider := fetch.NewClarionProvider(nil, clarion.FetchOptions{
@@ -186,16 +230,9 @@ func main() {
 					logger.Emit(otel.Event{Kind: otel.KindStoreError, Level: otel.LevelWarn, Comp: "main", Msg: "failed to get embeddings (search pool)", Err: err.Error()})
 					embeddings = make(map[string][]float32)
 				}
-				// Dedup only (no source limiting for search)
-				items = filter.SemanticDedup(items, embeddings, 0.85)
-
-				filteredEmbeddings := make(map[string][]float32)
-				for _, item := range items {
-					if emb, ok := embeddings[item.ID]; ok {
-						filteredEmbeddings[item.ID] = emb
-					}
-				}
-				return ui.SearchPoolLoaded{Items: items, Embeddings: filteredEmbeddings, QueryID: queryID}
+				// No dedup for search: SemanticDedup is O(n^2) and dominates latency
+				// for large pools. The reranker handles relevance; dupes cluster naturally.
+				return ui.SearchPoolLoaded{Items: items, Embeddings: embeddings, QueryID: queryID}
 			}
 		},
 		// markRead
@@ -213,17 +250,60 @@ func main() {
 				return ui.RefreshTick{}
 			}
 		},
-		// embedQuery: embed a query string for semantic search
-		EmbedQuery: func(ctx context.Context, query string, queryID string) tea.Cmd {
-			return func() tea.Msg {
-				emb, err := embedder.EmbedQuery(ctx, query)
-				return ui.QueryEmbedded{Query: query, Embedding: emb, Err: err, QueryID: queryID}
-			}
+		// SearchFTS: instant lexical search (synchronous)
+		SearchFTS: func(query string, limit int) ([]store.Item, error) {
+			return st.SearchFTS(query, limit)
 		},
-		// batchRerank: single Jina API call for all docs
-		BatchRerank: func(ctx context.Context, query string, docs []string, queryID string) tea.Cmd {
+		Obs: ui.ObsConfig{
+			Logger: logger,
+			Ring:   ring,
+		},
+		Features: ui.Features{
+			MLT:  true,
+			FTS5: true,
+		},
+	}
+
+	// Wire embedding closures only when an AI backend is available.
+	// Interactive search gets its own embedder — no rate limiter,
+	// no contention with the background embedding worker.
+	if embedder != nil {
+		if e2eMode || jinaKey == "" {
+			cfg.EmbedQuery = func(ctx context.Context, query string, queryID string) tea.Cmd {
+				return func() tea.Msg {
+					emb, err := embed.EmbedQuery(ctx, embedder, query)
+					return ui.QueryEmbedded{Query: query, Embedding: emb, Err: err, QueryID: queryID}
+				}
+			}
+		} else {
+			queryEmbedder := embed.NewJinaEmbedder(jinaKey, embedModel)
+			queryEmbedder.SetRateLimit(0) // no throttle for interactive queries
+			cfg.EmbedQuery = func(ctx context.Context, query string, queryID string) tea.Cmd {
+				return func() tea.Msg {
+					emb, err := embed.EmbedQuery(ctx, queryEmbedder, query)
+					return ui.QueryEmbedded{Query: query, Embedding: emb, Err: err, QueryID: queryID}
+				}
+			}
+		}
+	}
+
+	// Wire reranker based on backend type.
+	// Jina: fast batch API → auto-rerank after every search.
+	// Ollama: slow per-item scoring → user presses R to opt in.
+	autoReranks := false
+	if ar, ok := reranker.(rerank.AutoReranker); ok {
+		autoReranks = ar.AutoReranks()
+	}
+	cfg.AutoReranks = autoReranks
+
+	if autoReranks {
+		// Batch path: single API call for all docs (Jina).
+		// 15s timeout prevents indefinite hangs from retries/rate limiting.
+		cfg.BatchRerank = func(ctx context.Context, query string, docs []string, queryID string) tea.Cmd {
 			return func() tea.Msg {
-				scores, err := jinaReranker.Rerank(ctx, query, docs)
+				rerankCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+				defer cancel()
+				scores, err := reranker.Rerank(rerankCtx, query, docs)
 				if err != nil {
 					return ui.RerankComplete{Query: query, Err: err, QueryID: queryID}
 				}
@@ -235,12 +315,25 @@ func main() {
 				}
 				return ui.RerankComplete{Query: query, Scores: result, QueryID: queryID}
 			}
-		},
-		Obs: ui.ObsConfig{
-			Logger: logger,
-			Ring:   ring,
-		},
-		AutoReranks: true,
+		}
+		logger.Emit(otel.Event{Kind: otel.KindStartup, Level: otel.LevelInfo, Comp: "main", Msg: "reranker: auto (batch)", Extra: map[string]any{"name": reranker.Name()}})
+	} else if reranker != nil && reranker.Available() {
+		// Per-entry path: one HTTP call per document (Ollama)
+		cfg.ScoreEntry = func(ctx context.Context, query string, doc string, itemID string, queryID string) tea.Cmd {
+			return func() tea.Msg {
+				if err := ctx.Err(); err != nil {
+					return ui.EntryReranked{ItemID: itemID, Score: 0, QueryID: queryID, Err: err}
+				}
+				score, err := reranker.Rerank(ctx, query, []string{doc})
+				if err != nil || len(score) == 0 {
+					return ui.EntryReranked{ItemID: itemID, Score: 0.5, QueryID: queryID, Err: err}
+				}
+				return ui.EntryReranked{ItemID: itemID, Score: score[0].Score, QueryID: queryID}
+			}
+		}
+		logger.Emit(otel.Event{Kind: otel.KindStartup, Level: otel.LevelInfo, Comp: "main", Msg: "reranker: manual (per-entry)", Extra: map[string]any{"name": reranker.Name()}})
+	} else {
+		logger.Emit(otel.Event{Kind: otel.KindStartup, Level: otel.LevelWarn, Comp: "main", Msg: "no reranker available — cosine only"})
 	}
 
 	app := ui.NewAppWithConfig(cfg)

@@ -28,6 +28,17 @@ var ReadItem = lipgloss.NewStyle().
 	Foreground(colorSecondary).
 	Padding(0, 1)
 
+// MetaItem style for secondary metadata lines.
+var MetaItem = lipgloss.NewStyle().
+	Foreground(colorSecondary).
+	Padding(0, 1)
+
+// ShimmerHead style for the moving selection highlight.
+var ShimmerHead = lipgloss.NewStyle().
+	Foreground(lipgloss.Color("235")).
+	Background(colorHighlight).
+	Bold(true)
+
 // TimeBandHeader style for time band labels (e.g., "Just Now", "Today").
 var TimeBandHeader = lipgloss.NewStyle().
 	Bold(true).
@@ -101,4 +112,3 @@ var DebugHeaderStyle = lipgloss.NewStyle().
 	Bold(true).
 	Foreground(colorHighlight).
 	MarginBottom(0)
-

@@ -311,3 +311,9 @@ func SemanticDedup(items []store.Item, embeddings map[string][]float32, threshol
 
 	return result
 }
+
+// CosineSimilarity calculates the cosine similarity between two vectors.
+// Wrapper around embed.CosineSimilarity for convenience.
+func CosineSimilarity(a, b []float32) float32 {
+	return embed.CosineSimilarity(a, b)
+}

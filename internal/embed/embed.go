@@ -14,6 +14,22 @@ type Embedder interface {
 	Embed(ctx context.Context, text string) ([]float32, error)
 }
 
+// QueryEmbedder extends Embedder with query-specific embedding.
+// Backends like Jina use different task parameters for queries vs documents.
+// Backends that don't differentiate (e.g., Ollama) need not implement this.
+type QueryEmbedder interface {
+	EmbedQuery(ctx context.Context, text string) ([]float32, error)
+}
+
+// EmbedQuery embeds text using the query-specific method if available,
+// otherwise falls back to the generic Embed method.
+func EmbedQuery(ctx context.Context, e Embedder, text string) ([]float32, error) {
+	if qe, ok := e.(QueryEmbedder); ok {
+		return qe.EmbedQuery(ctx, text)
+	}
+	return e.Embed(ctx, text)
+}
+
 // BatchEmbedder extends Embedder with batch embedding support.
 // Implementations can embed multiple texts in a single API call for efficiency.
 // When EmbedBatch returns nil error, the result slice must have the same length

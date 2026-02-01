@@ -83,6 +83,16 @@ func Open(dbPath string) (*Store, error) {
 		return nil, fmt.Errorf("create tables: %w", err)
 	}
 
+	if err := s.migrateFTS(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate FTS: %w", err)
+	}
+
+	if err := s.rebuildFTS(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("rebuild FTS: %w", err)
+	}
+
 	if err := s.migrateEmbeddings(); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("migrate embeddings: %w", err)
@@ -117,6 +127,179 @@ func (s *Store) createTables() error {
 		return fmt.Errorf("execute schema: %w", err)
 	}
 	return nil
+}
+
+// migrateFTS ensures the FTS5 schema is current.
+// Uses PRAGMA user_version to track schema versions:
+//   0 = fresh install or pre-FTS (no FTS tables)
+//   1 = FTS without author column (early adopters)
+//   2 = FTS with author column (current)
+func (s *Store) migrateFTS() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	var version int
+	if err := s.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
+		return fmt.Errorf("read user_version: %w", err)
+	}
+
+	switch {
+	case version >= 2:
+		// Current schema — no migration needed.
+		return nil
+
+	case version == 1:
+		// Upgrade from FTS without author → FTS with author.
+		// Must drop and recreate because FTS5 virtual tables cannot be ALTERed.
+		_, err := s.db.Exec(`
+			DROP TRIGGER IF EXISTS items_ai;
+			DROP TRIGGER IF EXISTS items_au;
+			DROP TRIGGER IF EXISTS items_ad;
+			DROP TABLE IF EXISTS items_fts;
+		`)
+		if err != nil {
+			return fmt.Errorf("drop old FTS schema: %w", err)
+		}
+		// Fall through to create fresh schema below.
+		fallthrough
+
+	case version == 0:
+		// Fresh install or pre-FTS: create tables from scratch.
+		ftsSchema := `
+			CREATE VIRTUAL TABLE IF NOT EXISTS items_fts USING fts5(
+				title,
+				summary,
+				source_name,
+				author,
+				content='items',
+				content_rowid='rowid',
+				tokenize='unicode61 remove_diacritics 2'
+			);
+
+			CREATE TRIGGER IF NOT EXISTS items_ai AFTER INSERT ON items BEGIN
+				INSERT INTO items_fts(rowid, title, summary, source_name, author)
+				VALUES (new.rowid, new.title, new.summary, new.source_name, new.author);
+			END;
+
+			CREATE TRIGGER IF NOT EXISTS items_au AFTER UPDATE OF title, summary, source_name, author ON items BEGIN
+				INSERT INTO items_fts(items_fts, rowid, title, summary, source_name, author)
+				VALUES ('delete', old.rowid, old.title, old.summary, old.source_name, old.author);
+				INSERT INTO items_fts(rowid, title, summary, source_name, author)
+				VALUES (new.rowid, new.title, new.summary, new.source_name, new.author);
+			END;
+
+			CREATE TRIGGER IF NOT EXISTS items_ad AFTER DELETE ON items BEGIN
+				INSERT INTO items_fts(items_fts, rowid, title, summary, source_name, author)
+				VALUES ('delete', old.rowid, old.title, old.summary, old.source_name, old.author);
+			END;
+		`
+		if _, err := s.db.Exec(ftsSchema); err != nil {
+			return fmt.Errorf("create FTS schema: %w", err)
+		}
+	}
+
+	// Set version to current.
+	if _, err := s.db.Exec("PRAGMA user_version = 2"); err != nil {
+		return fmt.Errorf("set user_version: %w", err)
+	}
+
+	return nil
+}
+
+// rebuildFTS populates the FTS index from all existing items.
+// Only rebuilds if the index is empty but items exist,
+// avoiding unnecessary work on normal startups.
+func (s *Store) rebuildFTS() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	var ftsCount int
+	if err := s.db.QueryRow("SELECT count(*) FROM items_fts_docsize").Scan(&ftsCount); err != nil {
+		return fmt.Errorf("check FTS docsize count: %w", err)
+	}
+
+	if ftsCount > 0 {
+		return nil // Index already populated, triggers keep it in sync
+	}
+
+	var itemsCount int
+	if err := s.db.QueryRow("SELECT count(*) FROM items").Scan(&itemsCount); err != nil {
+		return fmt.Errorf("check items count: %w", err)
+	}
+
+	if itemsCount == 0 {
+		return nil // Nothing to index
+	}
+
+	_, err := s.db.Exec("INSERT INTO items_fts(items_fts) VALUES('rebuild')")
+	if err != nil {
+		return fmt.Errorf("rebuild FTS index: %w", err)
+	}
+	return nil
+}
+
+// SearchFTS performs a full-text search using FTS5 and returns matching items
+// ordered by BM25 relevance.
+//
+// Column weights: title=10, summary=5, source_name=1, author=3.
+// If the raw query fails (FTS5 syntax error), retries as a quoted literal string.
+//
+// Thread-safe: acquires read lock.
+func (s *Store) SearchFTS(query string, limit int) ([]Item, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if limit <= 0 {
+		limit = 50
+	}
+
+	items, err := s.searchFTSRaw(query, limit)
+	if err != nil {
+		// Retry with quoted literal on FTS5 syntax error.
+		// This handles queries like "C++", unclosed quotes, reserved words.
+		escaped := `"` + strings.ReplaceAll(query, `"`, `""`) + `"`
+		items, err = s.searchFTSRaw(escaped, limit)
+		if err != nil {
+			return nil, fmt.Errorf("FTS search: %w", err)
+		}
+	}
+	return items, nil
+}
+
+func (s *Store) searchFTSRaw(query string, limit int) ([]Item, error) {
+	// bm25() returns values where smaller (more negative) = more relevant.
+	// ORDER BY bm25(...) sorts most relevant first.
+	// Column weights: title=10, summary=5, source_name=1, author=3.
+	rows, err := s.db.Query(`
+		SELECT i.id, i.source_type, i.source_name, i.title, i.summary,
+			   i.url, i.author, i.published_at, i.fetched_at, i.read, i.saved
+		FROM items_fts
+		JOIN items i ON i.rowid = items_fts.rowid
+		WHERE items_fts MATCH ?
+		ORDER BY bm25(items_fts, 10.0, 5.0, 1.0, 3.0)
+		LIMIT ?
+	`, query, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var items []Item
+	for rows.Next() {
+		var item Item
+		var read, saved int
+		if err := rows.Scan(
+			&item.ID, &item.SourceType, &item.SourceName, &item.Title,
+			&item.Summary, &item.URL, &item.Author, &item.Published,
+			&item.Fetched, &read, &saved,
+		); err != nil {
+			return nil, fmt.Errorf("scan FTS result: %w", err)
+		}
+		item.Read = read != 0
+		item.Saved = saved != 0
+		items = append(items, item)
+	}
+	return items, rows.Err()
 }
 
 // Close closes the database connection.

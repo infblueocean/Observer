@@ -801,9 +801,9 @@ func TestAppRerankProgressView(t *testing.T) {
 		t.Errorf("Status bar should contain 'Reranking', got: %s", view)
 	}
 
-	// statusText-based view shows spinner + status text, not detailed panel
-	if strings.Contains(view, "✓") {
-		t.Errorf("Status bar view should not show checkmarks, got: %s", view)
+	// Should show pipeline strip with pending rerank
+	if !strings.Contains(view, "R:.") {
+		t.Errorf("Status bar should show pending rerank in strip, got: %s", view)
 	}
 }
 
@@ -1069,9 +1069,9 @@ func TestAppBatchRerankView(t *testing.T) {
 		t.Errorf("View should show 'Reranking' during batch rerank, got: %s", view)
 	}
 
-	// Should NOT show checkmarks
-	if strings.Contains(view, "✓") {
-		t.Errorf("Batch rerank view should not show checkmarks, got: %s", view)
+	// Should show checkmarks/pipeline strip
+	if !strings.Contains(view, "P:✓") {
+		t.Errorf("Batch rerank view should show pipeline strip, got: %s", view)
 	}
 }
 
@@ -1119,15 +1119,15 @@ func TestAppRerankCompleteError(t *testing.T) {
 	if updated.rerankPending {
 		t.Error("Should not be pending after error")
 	}
-	if updated.err == nil {
-		t.Error("Error should be set")
+	if updated.err != nil {
+		t.Errorf("Error should not be set on rerank failure (graceful degradation), got %v", updated.err)
 	}
 	if updated.rerankEntries != nil {
 		t.Error("rerankEntries should be cleared on error")
 	}
 
-	if updated.statusText != "" {
-		t.Errorf("statusText should be cleared on error, got %q", updated.statusText)
+	if updated.statusText != "Rerank failed -- showing cosine results" {
+		t.Errorf("statusText should show fallback message, got %q", updated.statusText)
 	}
 }
 
@@ -1430,7 +1430,9 @@ func TestSearchSavesAndRestores(t *testing.T) {
 	}
 }
 
-func TestSearchPoolLoaded(t *testing.T) {
+func TestSearchPoolLoaded_Buffered(t *testing.T) {
+	// When pool arrives before embedding AND embedding is in flight,
+	// items should be buffered (not displayed).
 	poolItems := []store.Item{
 		{ID: "p1", Title: "Pool 1"},
 		{ID: "p2", Title: "Pool 2"},
@@ -1441,20 +1443,86 @@ func TestSearchPoolLoaded(t *testing.T) {
 	}
 
 	app := NewApp(nil, nil, nil)
-	app.items = []store.Item{{ID: "old", Title: "Old"}}
+	app.items = []store.Item{{ID: "fts1", Title: "FTS Result"}}
 	app.activeQuery = "test query"
-	// Simulate: search submitted, results mode
 	app.mode = ModeResults
 	app.searchPoolPending = true
+	app.embeddingPending = true // embedding in flight
 
 	model, _ := app.Update(SearchPoolLoaded{Items: poolItems, Embeddings: poolEmb})
 	updated := model.(App)
 
-	if len(updated.Items()) != 3 {
-		t.Errorf("SearchPoolLoaded should replace items, got %d", len(updated.Items()))
+	// Items should NOT be replaced — FTS results stay visible
+	if len(updated.Items()) != 1 {
+		t.Errorf("items should still be FTS results (1 item), got %d", len(updated.Items()))
 	}
-	if updated.Items()[0].ID != "p1" {
-		t.Errorf("First item should be p1, got '%s'", updated.Items()[0].ID)
+	if updated.Items()[0].ID != "fts1" {
+		t.Errorf("items should still show FTS result, got '%s'", updated.Items()[0].ID)
+	}
+
+	// Pool should be buffered
+	if len(updated.poolItems) != 3 {
+		t.Errorf("poolItems should buffer 3 items, got %d", len(updated.poolItems))
+	}
+}
+
+func TestSearchPoolLoaded_NoEmbedder(t *testing.T) {
+	// When pool arrives and no embedding is in flight (no AI backend),
+	// show pool directly — don't buffer forever.
+	poolItems := []store.Item{
+		{ID: "p1", Title: "Pool 1"},
+		{ID: "p2", Title: "Pool 2"},
+	}
+
+	app := NewApp(nil, nil, nil)
+	app.items = []store.Item{{ID: "fts1", Title: "FTS Result"}}
+	app.activeQuery = "test query"
+	app.mode = ModeResults
+	app.searchPoolPending = true
+	app.embeddingPending = false // no embedder wired
+
+	model, _ := app.Update(SearchPoolLoaded{Items: poolItems})
+	updated := model.(App)
+
+	// Pool should be shown directly
+	if len(updated.Items()) != 2 {
+		t.Errorf("pool should replace items when no embedder, got %d", len(updated.Items()))
+	}
+	if updated.statusText != "" {
+		t.Errorf("statusText should be cleared, got %q", updated.statusText)
+	}
+	if updated.poolItems != nil {
+		t.Error("poolItems should not be buffered when no embedder")
+	}
+}
+
+func TestSearchPoolLoaded_WithEmbedding(t *testing.T) {
+	// When pool arrives after embedding, items should be replaced immediately.
+	poolItems := []store.Item{
+		{ID: "p1", Title: "Pool 1"},
+		{ID: "p2", Title: "Pool 2"},
+	}
+	poolEmb := map[string][]float32{
+		"p1": {0.1}, "p2": {0.2},
+	}
+
+	app := NewApp(nil, nil, nil)
+	app.items = []store.Item{{ID: "old", Title: "Old"}}
+	app.activeQuery = "test query"
+	app.mode = ModeResults
+	app.searchPoolPending = true
+	app.queryEmbedding = []float32{1.0, 0.0} // Embedding already arrived
+
+	model, _ := app.Update(SearchPoolLoaded{Items: poolItems, Embeddings: poolEmb})
+	updated := model.(App)
+
+	// Items should be replaced and ranked
+	if len(updated.Items()) != 2 {
+		t.Errorf("SearchPoolLoaded should replace items when embedding is ready, got %d", len(updated.Items()))
+	}
+	// Pool buffer should be cleared
+	if updated.poolItems != nil {
+		t.Error("poolItems should be nil after merge")
 	}
 }
 
@@ -1735,8 +1803,8 @@ func TestStatusTextClearedOnQueryEmbeddedError(t *testing.T) {
 	})
 	updated := model.(App)
 
-	if updated.statusText != "" {
-		t.Errorf("statusText should be cleared on QueryEmbedded error, got %q", updated.statusText)
+	if !strings.Contains(updated.statusText, "Search failed") {
+		t.Errorf("statusText should show error on QueryEmbedded error, got %q", updated.statusText)
 	}
 }
 
@@ -1948,5 +2016,77 @@ func TestStaleQueryIDRerankComplete(t *testing.T) {
 	}
 	if updated.statusText != `Reranking "test"...` {
 		t.Errorf("statusText should be unchanged, got %q", updated.statusText)
+	}
+}
+
+// --- F7: FTS5 Instant Search tests ---
+
+func TestSearchFlow_FTSFirst(t *testing.T) {
+	ftsItems := []store.Item{
+		{ID: "fts1", Title: "FTS Result 1"},
+		{ID: "fts2", Title: "FTS Result 2"},
+	}
+
+	app := NewAppWithConfig(AppConfig{
+		SearchFTS: func(query string, limit int) ([]store.Item, error) {
+			return ftsItems, nil
+		},
+		LoadSearchPool: func(ctx context.Context, queryID string) tea.Cmd {
+			return func() tea.Msg { return nil } // placeholder
+		},
+		EmbedQuery: func(ctx context.Context, query string, queryID string) tea.Cmd {
+			return func() tea.Msg { return nil } // placeholder
+		},
+		Features: Features{FTS5: true},
+	})
+
+	// Enter search mode
+	model, _ := app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+	updated := model.(App)
+
+	// Submit search
+	updated.filterInput.SetValue("test")
+	model, _ = updated.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated = model.(App)
+
+	// FTS results should be immediately visible
+	if len(updated.Items()) != 2 {
+		t.Errorf("FTS results should be applied synchronously, got %d items", len(updated.Items()))
+	}
+	if updated.Items()[0].ID != "fts1" {
+		t.Errorf("First item should be FTS result, got %s", updated.Items()[0].ID)
+	}
+
+	// Pool arrives before embedding — FTS results stay visible, pool is buffered
+	poolItems := []store.Item{
+		{ID: "pool1", Title: "Pool Result"},
+	}
+	model, _ = updated.Update(SearchPoolLoaded{Items: poolItems, QueryID: updated.queryID})
+	updated = model.(App)
+
+	// FTS results should STILL be visible (pool buffered, not yet ranked)
+	if len(updated.Items()) != 2 {
+		t.Errorf("FTS results should remain visible while waiting for embedding, got %d items", len(updated.Items()))
+	}
+	if updated.Items()[0].ID != "fts1" {
+		t.Errorf("First item should still be FTS result, got %s", updated.Items()[0].ID)
+	}
+	if len(updated.poolItems) != 1 {
+		t.Errorf("pool should be buffered (1 item), got %d", len(updated.poolItems))
+	}
+
+	// Embedding arrives — pool merged and ranked
+	model, _ = updated.Update(QueryEmbedded{Query: "test", Embedding: []float32{1.0}, QueryID: updated.queryID})
+	updated = model.(App)
+
+	// Now pool items should replace FTS results
+	if len(updated.Items()) != 1 {
+		t.Errorf("Pool should replace FTS results after embedding arrives, got %d items", len(updated.Items()))
+	}
+	if updated.Items()[0].ID != "pool1" {
+		t.Errorf("First item should be pool result after merge, got %s", updated.Items()[0].ID)
+	}
+	if updated.poolItems != nil {
+		t.Error("poolItems buffer should be cleared after merge")
 	}
 }

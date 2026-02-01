@@ -25,6 +25,9 @@ type FetchComplete struct {
 // RefreshTick triggers periodic refresh.
 type RefreshTick struct{}
 
+// ShimmerTick advances the selection shimmer animation.
+type ShimmerTick struct{}
+
 // QueryEmbedded is sent when a filter query has been embedded.
 type QueryEmbedded struct {
 	Query     string

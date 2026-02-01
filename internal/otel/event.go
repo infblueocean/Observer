@@ -37,6 +37,7 @@ const (
 	// Search events
 	KindSearchStart    EventKind = "search.start"
 	KindSearchPool     EventKind = "search.pool"
+	KindSearchFTS      EventKind = "search.fts" // FTS5 instant results
 	KindQueryEmbed     EventKind = "search.query_embed"
 	KindCosineRerank   EventKind = "search.cosine_rerank"
 	KindCrossEncoder   EventKind = "search.cross_encoder"
